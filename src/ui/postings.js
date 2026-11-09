@@ -524,9 +524,10 @@
     proxySelect.value = selectedProxy;
     if (state.metaSettings) {
       settingsForm.elements.appId.value = state.metaSettings.appId || '';
-      settingsForm.elements.redirectUri.value = state.metaSettings.redirectUri || (state.postingStorage?.url ? `${state.postingStorage.url}/functions/v1/meta-callback` : '');
+      settingsForm.elements.redirectUri.value = state.postingStorage?.url ? `${state.postingStorage.url}/functions/v1/meta-callback` : '';
       settingsForm.elements.graphVersion.value = state.metaSettings.graphVersion || 'v23.0';
     }
+    settingsForm.querySelector('button[type=submit]').disabled = !state.postingStorage?.configured;
     if (state.postingStorage?.url) storageForm.elements.url.value = state.postingStorage.url;
     root.replaceChildren();
     const available = new Set(accounts.map(account => account.id));

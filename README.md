@@ -10,6 +10,10 @@ Para publicar Reels, crie seu próprio projeto Supabase, aplique as migrações 
 
 Para métricas do TikTok, configure a Client Key e o Client Secret pelo próprio aplicativo. O segredo é salvo localmente com a proteção do Windows. A pasta `pressel-18/` é um site estático independente; veja o README dela antes de publicar.
 
+### Usar o mesmo serviço com outra pessoa
+
+No computador da outra pessoa, abra **Postagens → Configurações** e salve primeiro a URL do projeto Supabase e sua chave `sb_publishable_...` em **Vídeos temporários no Supabase**. A URL de retorno será preenchida automaticamente; salve a configuração Meta e então conecte a conta Instagram em **Contas**. O ID do aplicativo Instagram é obtido do serviço durante o login e não é digitado no campo. O `INSTAGRAM_APP_SECRET` permanece configurado apenas nas Edge Functions do Supabase; não envie esse segredo nem tokens de acesso para o computador de outra pessoa. Cada perfil precisa autorizar seu próprio login. Se o aplicativo Meta ainda estiver em modo de desenvolvimento, o perfil do colaborador também precisa ter acesso de teste no painel Meta.
+
 O arquivo `docs/politica-de-privacidade.example.html` é um modelo. Preencha os dados do responsável antes de publicar sua própria política; a política local personalizada não é enviada ao repositório.
 
 ## Postagens Instagram — versão local não comercial
