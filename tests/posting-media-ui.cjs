@@ -1,0 +1,123 @@
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const { app, BrowserWindow } = require('electron');
+
+app.whenReady().then(async () => {
+  const window = new BrowserWindow({ show: false, width: 1200, height: 900, webPreferences: { preload: path.join(__dirname, 'postings-ui-preload.cjs'), contextIsolation: true, sandbox: true, nodeIntegration: false, backgroundThrottling: false } });
+  try {
+    await window.loadFile(path.join(__dirname, '..', 'src', 'ui', 'index.html'));
+    const result = await window.webContents.executeJavaScript(`(async () => {
+      document.querySelector('[data-page=postings]').click();
+      for (let i = 0; i < 30 && document.body.dataset.ready !== 'true'; i++) await new Promise(resolve => setTimeout(resolve, 50));
+      const section = () => document.querySelector('.posting-media-settings');
+      const click = async label => {
+        [...section().querySelectorAll('button')].find(button => button.textContent === label).click();
+        await new Promise(resolve => setTimeout(resolve, 80));
+      };
+      const initial = section().textContent;
+      const initialOrder = section().querySelector('.posting-video-order select').value;
+      await click('Escolher pasta');
+      await click('+ Adicionar');
+      section().querySelector('.posting-video-order select').value = 'random';
+      section().querySelector('.posting-video-order select').dispatchEvent(new Event('change'));
+      await new Promise(resolve => setTimeout(resolve, 80));
+      const selectedOrder = section().querySelector('.posting-video-order select').value;
+      const selected = section().textContent;
+      const preview = section().querySelector('.posting-cover-preview');
+      await new Promise(resolve => setTimeout(resolve, 40));
+      const previewReady = !preview.disabled && preview.querySelector('img')?.src.startsWith('data:image/png;base64,');
+      const actions = [...section().querySelector('.posting-media-cover-actions').children];
+      const stacked = actions.length === 2 && actions[0].getBoundingClientRect().bottom < actions[1].getBoundingClientRect().top && actions.every(button => button.getBoundingClientRect().width >= 70);
+      preview.click();
+      const expanded = Boolean(document.querySelector('.posting-cover-dialog')?.open);
+      document.querySelector('.posting-cover-dialog button').click();
+      const addButtons = [...document.querySelectorAll('.posting-card button')].filter(button => button.textContent === 'Adicionar vídeos').length;
+      const details = document.querySelectorAll('.posting-card .posting-account-details').length;
+      const reconnect = [...document.querySelectorAll('.posting-card button')].filter(button => button.textContent === 'Reconectar Instagram').length;
+      return { initial, initialOrder, selectedOrder, selected, previewReady, stacked, expanded, addButtons, details, reconnect };
+    })()`);
+    await new Promise(resolve => setTimeout(resolve, 120));
+    const persistent = await window.webContents.executeJavaScript("({text:document.querySelector('.posting-media-settings').textContent,preview:!!document.querySelector('.posting-media-settings .posting-cover-preview img')})");
+    assert.match(persistent.text, /capa.png/);
+    assert.equal(persistent.preview, true);
+    const image = await window.webContents.capturePage();
+    fs.mkdirSync(path.join(__dirname, '..', '.smoke'), { recursive: true });
+    fs.writeFileSync(path.join(__dirname, '..', '.smoke', 'posting-media-layout.png'), image.toPNG());
+    const after = await window.webContents.executeJavaScript(`(async () => {
+      const section = () => document.querySelector('.posting-media-settings');
+      [...section().querySelectorAll('button')].find(button => button.textContent === 'Remover').click();
+      await new Promise(resolve => setTimeout(resolve, 80));
+      const removed = section().textContent;
+      document.querySelector('[data-posting-tab=schedule]').click();
+      return { removed, hiddenOnSchedule: section().hidden };
+    })()`);
+    assert.match(result.initial, /Nenhuma pasta selecionada/);
+    assert.match(result.initial, /Capa dos Reels/);
+    assert.equal(result.initialOrder, 'sequence');
+    assert.equal(result.selectedOrder, 'random');
+    assert.doesNotMatch(result.initial, /Ordem de postagem|Limpeza de metadados|Depois de publicar/);
+    assert.match(result.selected, /C:\\Videos/);
+    assert.match(result.selected, /2 adicionados/);
+    assert.match(result.selected, /capa.png/);
+    assert.match(result.selected, /Capa selecionada/);
+    assert.equal(result.previewReady, true);
+    assert.equal(result.stacked, true);
+    assert.equal(result.expanded, true);
+    assert.equal(result.addButtons, 0);
+    assert.equal(result.details, 0);
+    assert.equal(result.reconnect, 0);
+    assert.match(after.removed, /Sem capa/);
+    assert.equal(after.hiddenOnSchedule, true);
+    window.setSize(1900, 1000);
+    const layout = await window.webContents.executeJavaScript(`(() => {
+      const state = window.postingState;
+      const base = state.accounts.find(account => account.platform === 'instagram');
+      for (let index = 2; index <= 12; index++) state.accounts.push({ ...base, id: 'ig-preview-' + index, handle: 'perfil.' + index, name: 'Perfil ' + index, meta: index === 2 ? { connected: false } : base.meta });
+      window.renderPostings(state);
+      document.querySelector('#posting-select-all').click();
+      document.querySelector('[data-posting-tab=queue]').click();
+      const cards = [...document.querySelectorAll('#posting-tab-queue .posting-card[data-account-id]')];
+      const first = cards[0].getBoundingClientRect();
+      const identityTop = cards[0].querySelector('.posting-identity').getBoundingClientRect().top;
+      const nextTop = cards[0].querySelector('.posting-next').getBoundingClientRect().top;
+      const reconnect = [...cards].filter(card => [...card.querySelectorAll('button')].some(button => button.textContent === 'Reconectar Instagram')).length;
+      return { firstRow: cards.filter(card => Math.abs(card.getBoundingClientRect().top - first.top) < 2).length, width: first.width, sameHeaderRow: Math.abs(identityTop - nextTop) < 15, reconnect };
+    })()`);
+    assert.equal(layout.firstRow, 4);
+    assert.ok(layout.width <= 390);
+    assert.equal(layout.sameHeaderRow, true);
+    assert.equal(layout.reconnect, 1);
+    await new Promise(resolve => setTimeout(resolve, 120));
+    const compact = await window.webContents.capturePage();
+    fs.writeFileSync(path.join(__dirname, '..', '.smoke', 'posting-media-compact.png'), compact.toPNG());
+    const cleared = await window.webContents.executeJavaScript(`(async () => {
+      window.confirm = () => true;
+      const card = document.querySelector('.posting-card[data-account-id="ig-test"]');
+      const button = [...card.querySelectorAll('button')].find(node => node.textContent.startsWith('Limpar fila ('));
+      if (!button) return false;
+      button.click();
+      await new Promise(resolve => setTimeout(resolve, 80));
+      return !window.postingState.postings.items.some(item => item.account_id === 'ig-test' && item.status === 'queued');
+    })()`);
+    assert.equal(cleared, true);
+    const history = await window.webContents.executeJavaScript(`(() => {
+      const state = window.postingState;
+      state.postings.items.push({ id: 'archived-reel', account_id: 'removed-account', account_name: 'Conta removida', file: 'antigo.mp4', status: 'cancelled', created_at: '2026-11-01T12:00:00.000Z' });
+      window.applyStudioState(state);
+      const queueHasPublished = Boolean(document.querySelector('.posting-item-published'));
+      const archivedInQueue = Boolean(document.querySelector('.posting-archived'));
+      document.querySelector('[data-page=dashboard]').click();
+      const dashboardQueueHasPublished = document.querySelector('#dashboard-queue').textContent.includes('publicado.mp4');
+      document.querySelector('[data-page=history]').click();
+      document.querySelector('[data-history-filter=postings]').click();
+      return { queueHasPublished, archivedInQueue, dashboardQueueHasPublished, text: document.querySelector('#history-list').textContent };
+    })()`);
+    assert.equal(history.queueHasPublished, false);
+    assert.equal(history.archivedInQueue, false);
+    assert.equal(history.dashboardQueueHasPublished, false);
+    assert.match(history.text, /publicado\.mp4/);
+    assert.match(history.text, /antigo\.mp4/);
+  } catch (error) { console.error(`Posting media UI failed: ${error.message}`); process.exitCode = 1; }
+  finally { window.destroy(); app.quit(); }
+}).catch(error => { console.error(error); process.exitCode = 1; app.quit(); });

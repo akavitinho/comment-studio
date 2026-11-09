@@ -1,0 +1,17 @@
+node_modules/
+.local/
+.smoke/
+*.log
+build/
+dist/
+artifacts/
+outputs/
+supabase/.branches/
+supabase/.temp/
+.env
+.env.*
+!.env.example
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+docs/politica-de-privacidade.html

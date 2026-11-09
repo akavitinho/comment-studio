@@ -1,0 +1,9 @@
+*{box-sizing:border-box}html,body{margin:0;font:13px Inter,Segoe UI,sans-serif;background:#f7f7f8;color:#292630}#bar{height:60px;display:flex;align-items:center;gap:7px;padding:9px 12px;border-bottom:1px solid #e8e6eb}button{height:36px;min-width:36px;border:0;border-radius:7px;background:transparent;color:#5d5764;font:inherit;cursor:pointer}button:hover{background:#ebe9ee}button:disabled{opacity:.35;cursor:default}button:focus-visible,input:focus-visible{outline:2px solid #9876d5;outline-offset:1px}#address{height:37px;min-width:80px;flex:1;border:1px solid #e0dde4;border-radius:8px;background:#fff;padding:0 12px;color:#292630;font:inherit}#go{background:#7652b5;color:white;padding:0 16px}#go:hover{background:#65439f}#status{display:block;height:22px;padding:3px 12px;color:#a14b4b;font-size:12px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+#bar>button:not(#go){font-size:21px;line-height:1}#bar>button:not(#go):disabled:hover{background:transparent}#reload{font-size:19px!important}#bar>button:not(#go):not(:disabled):hover{color:#7652b5}
+#tab-strip{height:34px;display:flex;align-items:stretch;gap:5px;padding:3px 10px 0;background:#efedf1;border-bottom:1px solid #e4e1e8}
+#tabs{display:flex;align-items:stretch;gap:4px;min-width:0;overflow-x:auto;scrollbar-width:thin}
+.browser-tab{display:flex;align-items:center;min-width:130px;max-width:235px;background:#e8e5eb;border:1px solid transparent;border-radius:7px 7px 0 0}
+.browser-tab.active{background:#fff;border-color:#ded9e4;border-bottom-color:#fff}
+.browser-tab-select{min-width:0;height:29px;flex:1;padding:0 5px 0 11px;text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px}
+.browser-tab-close{width:25px;min-width:25px;height:25px;margin-right:3px;font-size:17px;line-height:1}
+#new-tab{height:28px;min-width:28px;font-size:19px}

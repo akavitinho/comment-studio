@@ -1,0 +1,90 @@
+const assert = require('node:assert/strict');
+const { BrowserWindow, session } = require('electron');
+const { xPage } = require('../src/x-page-controls.cjs');
+const { XBrowser } = require('../src/x-browser.cjs');
+async function run() {
+  const ses = session.fromPartition(`x-fixture-${Date.now()}`);
+  const article = (id, author, text = 'Post alvo') => `<article data-testid="tweet"><a href="/${author}/status/${id}"><time datetime="${new Date().toISOString()}">Agora</time></a><div data-testid="tweetText">${text}</div><button data-testid="like" onclick="this.dataset.testid='unlike';window.likes=(window.likes||0)+1">Curtir</button><button data-testid="reply" onclick="reply('${id}')">Responder</button></article>`;
+  ses.protocol.handle('https', () => new Response(`<!doctype html><meta charset="utf-8"><style>body{font:16px sans-serif}article{padding:12px;border:1px solid;margin:4px}button{min-width:90px;height:32px}[role=dialog]{position:fixed;inset:20px;background:white;padding:30px;z-index:3}[contenteditable]{border:1px solid;height:70px}</style>
+    <button role="tab" aria-selected="false" onclick="this.setAttribute('aria-selected','true')">For you</button><nav><a data-testid="AppTabBar_Profile_Link" href="/me">Meu perfil</a></nav><main>${article('999', 'other', 'Outro post')}${article('123', 'author')}</main>
+    <script>function reply(id){const d=document.createElement('div');d.setAttribute('role','dialog');d.innerHTML='<a href="/author/status/'+id+'">Post alvo</a><div data-testid="tweetTextarea_0" contenteditable="true"></div><button data-testid="tweetButton">Enviar</button>';document.body.append(d);d.querySelector('button').onclick=()=>{const text=d.querySelector('[contenteditable]').textContent;const a=document.createElement('article');a.dataset.testid='tweet';a.innerHTML='<a href="/me/status/456"><time datetime="'+new Date().toISOString()+'">Agora</time></a><div data-testid="tweetText"></div>';a.querySelector('div').textContent=text;document.querySelector('main').prepend(a);d.remove();window.replies=(window.replies||0)+1;};}</script>`, { headers: { 'content-type': 'text/html; charset=utf-8' } }));
+  const win = new BrowserWindow({ show: false, width: 1100, height: 800, webPreferences: { session: ses, sandbox: true, contextIsolation: true, nodeIntegration: false, backgroundThrottling: false } });
+  const js = code => win.webContents.executeJavaScript(code);
+  const page = (op, args) => js(`(${xPage.toString()})(${JSON.stringify(op)},${JSON.stringify(args || {})})`);
+  const browser = new XBrowser({ getWindow: () => win, openAccount: async () => {} });
+  let passed = 0;
+  try {
+    const state = await browser.search('a', 'teste', 'latest');
+    assert.equal(state.handle, 'me'); assert.equal(state.posts.length, 2); passed++;
+    const post = state.posts.find(p => p.id === '123');
+    await win.loadURL(post.url);
+    await js(`reply('123')`);
+    assert.equal(await page('focusEditor', { id: post.id, author: post.author, parentText: post.text }), true, 'matching editor can be focused');
+    const reused = await browser.inspectPost('a', post);
+    assert.equal(reused.posts.some(p => p.id === post.id), true);
+    assert.equal((await page('inspect')).dialogOpen, true, 'existing target page and editor are preserved');
+    const reusedDraft = await browser.prepare('a', post, 'reply', 'Resposta no editor aberto');
+    assert.equal(await browser.send('a', post, 'reply', 'Resposta no editor aberto', reusedDraft, () => true), 'confirmed'); passed++;
+    await win.loadURL(post.url);
+    let prepared = await browser.prepare('a', post, 'like', ''); let dispatches = 0;
+    let sent;
+    try { sent = await browser.send('a', post, 'like', '', prepared, () => { dispatches++; return true; }); }
+    catch (e) { throw new Error(e.message + ' DIAGNOSTIC ' + await js('JSON.stringify({likes:window.likes,html:document.body.innerHTML})')); }
+    assert.equal(sent, 'confirmed');
+    assert.equal(await js(`document.querySelector('article button').dataset.testid`), 'like', 'unrelated post was untouched');
+    assert.equal(await js('window.likes'), 1); assert.equal(dispatches, 1); passed++;
+    assert.equal((await browser.prepare('a', post, 'like', '')).skipped, true); passed++;
+    prepared = await browser.prepare('a', post, 'reply', 'Resposta de teste');
+    assert.equal(await browser.send('a', post, 'reply', 'Resposta de teste', prepared, () => true), 'confirmed');
+    assert.equal(await js('window.replies'), 1); passed++;
+    await js(`document.querySelector('main').innerHTML='<div data-testid="emptyState">Nenhum resultado</div>'`);
+    assert.equal((await page('inspect')).empty, true); assert.equal((await page('inspect')).recognized, true); passed++;
+    await js(`document.querySelector('main').innerHTML='<div>Carregando</div>'`);
+    assert.equal((await page('inspect')).recognized, false); passed++;
+    await js(`document.querySelector('nav').remove()`);
+    assert.equal((await page('inspect')).handle, null); await assert.rejects(browser.read('a'), /identidade/); passed++;
+    await js(`history.replaceState(null,'','/account/access')`);
+    assert.match((await page('inspect')).attention, /verificação/); passed++;
+    await win.loadURL(post.url);
+    await js(`document.body.insertAdjacentHTML('beforeend','<div role="alert">Rate limit exceeded</div>')`);
+    assert.match((await page('inspect')).attention, /restringiu/); passed++;
+    await win.loadURL(post.url);
+    await js(`document.querySelector('article').insertAdjacentHTML('beforeend','<span data-testid="promotedIndicator">Promovido</span>')`);
+    assert.equal((await page('inspect')).posts[0].ad, true); passed++;
+    await js(`reply('999')`);
+    assert.equal(await page('editor', { id: '123' }), null, 'wrong-target editor rejected'); passed++;
+    await win.loadURL(post.url);
+    await js(`window.originalReply=reply;window.reply=id=>{originalReply(id);const d=document.querySelector('[role=dialog]');d.removeAttribute('role');document.querySelector('main').replaceChildren(d);history.pushState(null,'','/compose/post');document.querySelector('nav').remove();};void 0;`);
+    const fullPagePrepared = await browser.prepare('a', post, 'reply', 'Resposta em tela inteira');
+    assert.equal(await browser.send('a', post, 'reply', 'Resposta em tela inteira', fullPagePrepared, () => true), 'confirmed'); passed++;
+    await win.loadURL(post.url);
+    await js(`reply('999');const d=document.querySelector('[role=dialog]');d.removeAttribute('role');document.querySelector('main').replaceChildren(d);history.pushState(null,'','/compose/post');`);
+    assert.equal(await page('editor', { id: '123' }), null, 'full-page composer for a different parent rejected'); passed++;
+    await win.loadURL(post.url);
+    await js(`window.originalReply=reply;window.reply=id=>{originalReply(id);const d=document.querySelector('[role=dialog]');d.querySelector('a').href='/author';const t=document.createElement('div');t.dataset.testid='tweetText';t.textContent='Post alvo';d.prepend(t);};void 0;`);
+    const previewPrepared = await browser.prepare('a', post, 'reply', 'Resposta com prévia sem link');
+    assert.equal(await browser.send('a', post, 'reply', 'Resposta com prévia sem link', previewPrepared, () => true), 'confirmed'); passed++;
+    await js(`reply('123')`);
+    assert.equal(await page('editor', { id: '123', author: 'other', parentText: 'Post alvo' }), null, 'different author rejected');
+    assert.equal(await page('editor', { id: '123', author: 'author', parentText: 'Different post' }), null, 'different text rejected'); passed++;
+    const feed = await browser.search('a', 'Para você', 'latest', 'foryou');
+    assert.equal(feed.url, 'https://x.com/home'); assert.equal(feed.feedSelected, true); passed++;
+    await win.loadURL(post.url);
+    await js(`window.originalReply=reply;window.reply=id=>{originalReply(id);const d=document.querySelector('[role=dialog]');const author=document.createElement('span');author.textContent='@author';d.querySelector('a').replaceWith(author);const t=document.createElement('div');t.dataset.testid='tweetText';t.textContent='Post   alvo';d.prepend(t);d.querySelector('[contenteditable]').dataset.testid='tweetTextarea_1';};void 0;`);
+    const textAuthorPrepared = await browser.prepare('a', post, 'reply', 'Resposta com autor em texto');
+    assert.equal(await browser.send('a', post, 'reply', 'Resposta com autor em texto', textAuthorPrepared, () => true), 'confirmed'); passed++;
+    await js(`reply('123')`);
+    const diagnostic = await page('diagnoseEditor', { id: '123', author: 'author', parentText: 'Post alvo' });
+    assert.equal(diagnostic.matched, true); assert.equal(diagnostic.editors, 1);
+    assert.equal(await page('editor', { id: '123', author: 'someone_else', parentText: 'Post alvo' }), null); passed++;
+    await win.loadURL(post.url);
+    await browser.prepare('a', post, 'reply', 'Rascunho criado pelo aplicativo');
+    await browser.inspectPost('a', post);
+    assert.equal(browser.drafts.size, 0); assert.equal((await page('editor', { id: post.id, author: post.author, parentText: post.text })).text, ''); passed++;
+    await browser.prepare('a', post, 'reply', 'Outro rascunho do aplicativo');
+    await js(`document.querySelector('[contenteditable]').textContent='Alterado manualmente'`);
+    await assert.rejects(browser.inspectPost('a', post), /rascunho foi alterado/); passed++;
+    return { passed, liveX: false };
+  } finally { win.destroy(); }
+}
+module.exports = { run };

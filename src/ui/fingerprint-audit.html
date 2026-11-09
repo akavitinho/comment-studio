@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<title>Fingerprint Audit — Comment Studio</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0d1117; color: #c9d1d9; padding: 20px; line-height: 1.6; }
+h1 { color: #58a6ff; margin-bottom: 8px; font-size: 1.4em; }
+h2 { color: #8b949e; font-size: 1.1em; margin: 18px 0 8px; border-bottom: 1px solid #21262d; padding-bottom: 4px; }
+.test { display: flex; align-items: flex-start; gap: 10px; padding: 6px 10px; margin: 2px 0; border-radius: 6px; font-size: 0.9em; }
+.test:hover { background: #161b22; }
+.badge { display: inline-block; min-width: 54px; text-align: center; padding: 2px 8px; border-radius: 4px; font-weight: 600; font-size: 0.8em; flex-shrink: 0; }
+.pass { background: #1b4332; color: #52c41a; }
+.warn { background: #3b3000; color: #f0ad4e; }
+.fail { background: #3d1418; color: #f85149; }
+.label { color: #c9d1d9; min-width: 220px; }
+.value { color: #8b949e; word-break: break-all; }
+#summary { margin: 16px 0; padding: 12px 16px; border-radius: 8px; font-weight: 600; font-size: 1em; }
+.summary-good { background: #1b4332; color: #52c41a; }
+.summary-warn { background: #3b3000; color: #f0ad4e; }
+.summary-bad { background: #3d1418; color: #f85149; }
+canvas { display: none; }
+button { background: #21262d; color: #c9d1d9; border: 1px solid #30363d; padding: 8px 16px; border-radius: 6px; cursor: pointer; font-size: 0.9em; margin: 10px 4px 10px 0; }
+button:hover { background: #30363d; }
+</style>
+</head>
+<body>
+<h1>🔍 Fingerprint Audit</h1>
+<p style="color:#8b949e; margin-bottom: 6px;">Compara algumas APIs do navegador. Este diagnóstico não mede risco de restrição de conta nem garante acesso às plataformas.</p>
+<button onclick="runAudit()">Executar Auditoria</button>
+<button onclick="navigator.clipboard.writeText(document.getElementById('results').innerText)">Copiar Resultado</button>
+<div id="summary"></div>
+<div id="results"></div>
+<canvas id="testCanvas" width="256" height="256"></canvas>
+
+<script>
+function addResult(container, section, label, status, value) {
+  if (!container._sections) container._sections = {};
+  if (!container._sections[section]) {
+    const h = document.createElement('h2');
+    h.textContent = section;
+    container.appendChild(h);
+    container._sections[section] = true;
+  }
+  const div = document.createElement('div');
+  div.className = 'test';
+  div.innerHTML = `<span class="badge ${status}">${status.toUpperCase()}</span><span class="label">${label}</span><span class="value">${value}</span>`;
+  container.appendChild(div);
+  return status;
+}
+
+async function runAudit() {
+  const el = document.getElementById('results');
+  el.innerHTML = '';
+  el._sections = {};
+  let passes = 0, warns = 0, fails = 0;
+
+  function t(section, label, status, value) {
+    if (status === 'pass') passes++;
+    else if (status === 'warn') warns++;
+    else fails++;
+    return addResult(el, section, label, status, value);
+  }
+
+  // ── Automation Detection ──
+  const wd = navigator.webdriver;
+  t('Automação', 'navigator.webdriver', wd ? 'fail' : 'pass', String(wd));
+
+  const autoFlags = ['__nightmare', '_phantom', 'callPhantom', '_selenium_ide_recorder', '__webdriver_script_fn', '__driver_evaluate', '__webdriver_evaluate'];
+  const foundFlags = autoFlags.filter(f => f in window);
+  t('Automação', 'Flags de automação globais', foundFlags.length ? 'fail' : 'pass', foundFlags.length ? foundFlags.join(', ') : 'Nenhuma encontrada');
+
+  // ── Chrome Object ──
+  t('Chrome Object', 'window.chrome', window.chrome ? 'pass' : 'fail', window.chrome ? 'Presente' : 'AUSENTE — Gmail e IG verificam isso');
+  t('Chrome Object', 'chrome.app', window.chrome?.app ? 'pass' : 'fail', window.chrome?.app ? 'Presente' : 'Ausente');
+  t('Chrome Object', 'chrome.csi', typeof window.chrome?.csi === 'function' ? 'pass' : 'fail', typeof window.chrome?.csi);
+  t('Chrome Object', 'chrome.loadTimes', typeof window.chrome?.loadTimes === 'function' ? 'pass' : 'fail', typeof window.chrome?.loadTimes);
+  t('Chrome Object', 'chrome.runtime', window.chrome?.runtime ? 'pass' : 'warn', window.chrome?.runtime ? 'Presente' : 'Presente mas sem id (normal)');
+
+  // ── User Agent ──
+  const ua = navigator.userAgent;
+  const hasElectron = /Electron/i.test(ua);
+  t('User Agent', 'Electron no UA', hasElectron ? 'fail' : 'pass', hasElectron ? 'DETECTADO: ' + ua : 'Limpo');
+  const hasAppName = /Comment|Studio|tiktok-comment/i.test(ua);
+  t('User Agent', 'Nome do app no UA', hasAppName ? 'fail' : 'pass', hasAppName ? 'DETECTADO' : 'Limpo');
+  t('User Agent', 'UA completo', 'pass', ua);
+  // ── userAgentData ──
+  try {
+    const uad = navigator.userAgentData;
+    const brands = uad ? uad.brands.map(b => b.brand).join(', ') : '';
+    const hasChrome = brands.includes('Google Chrome');
+    t('User Agent', 'userAgentData.brands', hasChrome ? 'pass' : 'fail', brands || '(ausente — Google login bloqueará)');
+    t('User Agent', 'userAgentData.platform', uad?.platform ? 'pass' : 'warn', uad?.platform || 'Ausente');
+  } catch (e) {
+    t('User Agent', 'userAgentData', 'warn', 'Erro: ' + e.message);
+  }
+
+  // ── navigator.plugins ──
+  const plugins = navigator.plugins;
+  t('Plugins', 'navigator.plugins.length', plugins.length >= 1 ? 'pass' : 'fail', `${plugins.length} plugin(s)`);
+  const pluginNames = Array.from(plugins).map(p => p.name).join(', ');
+  t('Plugins', 'Plugins encontrados', plugins.length >= 3 ? 'pass' : plugins.length >= 1 ? 'warn' : 'fail', pluginNames || 'Nenhum — detecção certa');
+
+  // ── navigator.mimeTypes ──
+  t('Plugins', 'navigator.mimeTypes.length', navigator.mimeTypes.length >= 1 ? 'pass' : 'fail', `${navigator.mimeTypes.length}`);
+
+  // ── Languages ──
+  t('Idiomas', 'navigator.language', navigator.language ? 'pass' : 'warn', navigator.language);
+  t('Idiomas', 'navigator.languages', navigator.languages?.length >= 1 ? 'pass' : 'warn', JSON.stringify(navigator.languages));
+
+  // ── Permissions ──
+  try {
+    const notifPerm = await navigator.permissions.query({ name: 'notifications' });
+    t('Permissões', 'Notification permission query', notifPerm.state !== 'denied' ? 'pass' : 'warn', notifPerm.state);
+  } catch (e) {
+    t('Permissões', 'Notification permission query', 'warn', 'Erro: ' + e.message);
+  }
+  t('Permissões', 'Notification.permission', Notification.permission !== 'denied' ? 'pass' : 'warn', Notification.permission);
+
+  // ── WebRTC ──
+  try {
+    const pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
+    pc.createDataChannel('');
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    const sdp = pc.localDescription?.sdp || '';
+    const candidates = sdp.match(/candidate:.+/g) || [];
+    const hostCandidates = candidates.filter(c => /typ host/.test(c));
+    pc.close();
+    t('WebRTC', 'Leak de IP local', hostCandidates.length === 0 ? 'pass' : 'warn', hostCandidates.length === 0 ? 'Nenhum IP local vazado' : `${hostCandidates.length} candidato(s) host: ${hostCandidates.join(' | ')}`);
+  } catch (e) {
+    t('WebRTC', 'Leak de IP local', 'pass', 'WebRTC bloqueado ou indisponível: ' + e.message);
+  }
+
+  // ── Window Dimensions ──
+  const ow = window.outerWidth, oh = window.outerHeight;
+  const iw = window.innerWidth, ih = window.innerHeight;
+  t('Dimensões', 'outer >= inner', ow >= iw && oh >= ih ? 'pass' : 'warn', `outer: ${ow}x${oh}, inner: ${iw}x${ih}`);
+
+  // ── Connection API ──
+  t('APIs', 'navigator.connection', navigator.connection ? 'pass' : 'warn', navigator.connection ? `${navigator.connection.effectiveType}, rtt:${navigator.connection.rtt}` : 'Ausente');
+
+  // ── Battery API ──
+  try {
+    const battery = await navigator.getBattery();
+    t('APIs', 'navigator.getBattery()', 'pass', `charging:${battery.charging}, level:${battery.level}`);
+  } catch (e) {
+    t('APIs', 'navigator.getBattery()', 'warn', 'Erro: ' + e.message);
+  }
+
+  // ── Platform / Hardware ──
+  t('Hardware', 'navigator.platform', 'pass', navigator.platform);
+  t('Hardware', 'navigator.hardwareConcurrency', navigator.hardwareConcurrency >= 4 ? 'pass' : navigator.hardwareConcurrency >= 2 ? 'warn' : 'fail', String(navigator.hardwareConcurrency));
+  t('Hardware', 'navigator.deviceMemory', navigator.deviceMemory >= 4 ? 'pass' : navigator.deviceMemory >= 2 ? 'warn' : 'fail', navigator.deviceMemory ? navigator.deviceMemory + ' GB' : 'Indisponível');
+  t('Hardware', 'navigator.maxTouchPoints', navigator.maxTouchPoints === 0 || /Mobile|Android/i.test(navigator.userAgent) ? 'pass' : 'warn', String(navigator.maxTouchPoints) + (navigator.maxTouchPoints > 0 && !/Mobile/i.test(navigator.userAgent) ? ' — deveria ser 0 em desktop' : ''));
+  t('Hardware', 'navigator.vendor', navigator.vendor === 'Google Inc.' ? 'pass' : 'fail', navigator.vendor || '(vazio — detectável)');
+
+  // ── Canvas Fingerprint ──
+  try {
+    const canvas = document.getElementById('testCanvas');
+    const ctx = canvas.getContext('2d');
+    ctx.textBaseline = 'top';
+    ctx.font = '14px Arial';
+    ctx.fillStyle = '#f60';
+    ctx.fillRect(125, 1, 62, 20);
+    ctx.fillStyle = '#069';
+    ctx.fillText('Cwm fjordbank 😃', 2, 15);
+    ctx.fillStyle = 'rgba(102,204,0,0.7)';
+    ctx.fillRect(60, 10, 80, 40);
+    const dataURL = canvas.toDataURL();
+    const hash = dataURL.length;
+    t('Canvas', 'Canvas hash (tamanho)', 'pass', `${hash} chars — com noise por sessão`);
+    // Run a second time to verify consistency within the same session
+    const dataURL2 = canvas.toDataURL();
+    t('Canvas', 'Consistência intra-sessão', dataURL === dataURL2 ? 'pass' : 'warn', dataURL === dataURL2 ? 'Mesmo hash — consistente' : 'Hash diferente — instável');
+  } catch (e) {
+    t('Canvas', 'Canvas rendering', 'warn', 'Erro: ' + e.message);
+  }
+
+  // ── WebGL ──
+  try {
+    const glCanvas = document.createElement('canvas');
+    const gl = glCanvas.getContext('webgl') || glCanvas.getContext('experimental-webgl');
+    if (gl) {
+      const debugInfo = gl.getExtension('WEBGL_debug_renderer_info');
+      const vendor = debugInfo ? gl.getParameter(debugInfo.UNMASKED_VENDOR_WEBGL) : 'N/A';
+      const renderer = debugInfo ? gl.getParameter(debugInfo.UNMASKED_RENDERER_WEBGL) : 'N/A';
+      const isSuspicious = /SwiftShader|llvmpipe|software/i.test(renderer);
+      t('WebGL', 'Vendor', isSuspicious ? 'fail' : 'pass', vendor);
+      t('WebGL', 'Renderer', isSuspicious ? 'fail' : 'pass', renderer + (isSuspicious ? ' — SwiftShader/software = headless detectado' : ''));
+    } else {
+      t('WebGL', 'Suporte', 'warn', 'WebGL não disponível');
+    }
+  } catch (e) {
+    t('WebGL', 'Suporte', 'warn', 'Erro: ' + e.message);
+  }
+
+  // ── AudioContext Fingerprint ──
+  try {
+    const actx = new (window.OfflineAudioContext || window.webkitOfflineAudioContext)(1, 4096, 44100);
+    const osc = actx.createOscillator(); osc.type = 'triangle'; osc.frequency.setValueAtTime(10000, actx.currentTime);
+    const comp = actx.createDynamicsCompressor();
+    osc.connect(comp); comp.connect(actx.destination); osc.start(0);
+    const rendered = await actx.startRendering();
+    const data = rendered.getChannelData(0);
+    let sum = 0; for (let i = 0; i < data.length; i++) sum += Math.abs(data[i]);
+    t('AudioContext', 'Audio fingerprint', 'pass', 'Soma: ' + sum.toFixed(6) + ' — com noise por sessão');
+  } catch (e) {
+    t('AudioContext', 'Audio fingerprint', 'warn', 'Erro: ' + e.message);
+  }
+
+  // ── Screen Properties ──
+  t('Tela', 'screen.colorDepth', screen.colorDepth === 24 || screen.colorDepth === 32 ? 'pass' : 'warn', String(screen.colorDepth));
+  t('Tela', 'screen.pixelDepth', screen.pixelDepth === 24 || screen.pixelDepth === 32 ? 'pass' : 'warn', String(screen.pixelDepth));
+  t('Tela', 'screen.width x height', screen.width >= 1024 ? 'pass' : 'warn', screen.width + 'x' + screen.height);
+
+  // ── Timezone ──
+  const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  t('Timezone', 'Fuso horário', 'pass', tz + ' — confira se bate com o IP do proxy');
+
+  // ── Error Stack Trace ──
+  try {
+    throw new Error('stack test');
+  } catch (e) {
+    const hasElectronPath = /electron|app\.asar/i.test(e.stack);
+    t('Stack Trace', 'Paths internos no stack', hasElectronPath ? 'fail' : 'pass', hasElectronPath ? 'Electron path detectado no stack' : 'Limpo');
+  }
+
+  // ── ToString checks ──
+  try {
+    const fn = HTMLElement.prototype.click.toString();
+    t('Native Functions', 'toString() nativo', /native code/.test(fn) ? 'pass' : 'warn', fn.substring(0, 60));
+  } catch (e) {
+    t('Native Functions', 'toString() nativo', 'warn', e.message);
+  }
+
+  // ── CDP / DevTools detection ──
+  t('Automação', 'window.cdc_adoQpoasnfa76pfcZLmcfl', window.cdc_adoQpoasnfa76pfcZLmcfl ? 'fail' : 'pass', window.cdc_adoQpoasnfa76pfcZLmcfl ? 'ChromeDriver detectado' : 'Limpo');
+
+  // ── Summary ──
+  const total = passes + warns + fails;
+  const summaryEl = document.getElementById('summary');
+  if (fails === 0 && warns <= 2) {
+    summaryEl.className = 'summary-good';
+    summaryEl.textContent = `✅ ${passes}/${total} verificações passaram, ${warns} avisos, ${fails} diferenças encontradas.`;
+  } else if (fails === 0) {
+    summaryEl.className = 'summary-warn';
+    summaryEl.textContent = `⚠️ ${passes}/${total} verificações passaram, ${warns} avisos. Confira cada item abaixo.`;
+  } else {
+    summaryEl.className = 'summary-bad';
+    summaryEl.textContent = `⚠️ ${fails} diferença(s) técnica(s) encontrada(s). Este teste não estima risco de softban.`;
+  }
+}
+
+// Auto-run on load
+window.addEventListener('DOMContentLoaded', () => setTimeout(runAudit, 300));
+</script>
+</body>
+</html>

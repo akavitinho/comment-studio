@@ -1,0 +1,63 @@
+{
+  "name": "tiktok-comment-manager",
+  "productName": "Comment Studio",
+  "version": "0.2.12",
+  "private": true,
+  "description": "Aplicativo local com contas, proxies e campanhas TikTok com execução controlada.",
+  "main": "src/main.cjs",
+  "scripts": {
+    "start": "electron .",
+    "test": "node --test tests/*.test.cjs",
+    "test:dom": "electron tests/page-controls.cjs",
+    "test:desktop": "electron . --smoke",
+    "test:x:read-only": "electron . --check-x-readonly",
+    "dist:win": "node scripts/stage-runtime.cjs && node scripts/protect-build.cjs && electron-builder --win nsis --x64",
+    "test:protected": "node --test build/protected-app/tests/*.test.cjs"
+  },
+  "devDependencies": {
+    "electron": "45.0.0",
+    "electron-builder": "^26.18.1",
+    "javascript-obfuscator": "^5.10.0"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "2.108.1"
+  },
+  "build": {
+    "appId": "com.commentstudio.local",
+    "productName": "Comment Studio",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      {
+        "from": "build/protected-app/src",
+        "to": "src",
+        "filter": [
+          "**/*"
+        ]
+      },
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "build/runtime",
+        "to": "bin",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ],
+    "win": {
+      "target": "nsis",
+      "icon": "assets/icon.ico",
+      "artifactName": "Comment-Studio-Local-${version}-Protected-Setup.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    }
+  }
+}

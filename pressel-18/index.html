@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#100e16" />
+    <meta name="description" content="Confirmação de idade para acesso ao conteúdo." />
+    <title>Confirmação de idade</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main class="page">
+      <section class="card" aria-labelledby="age-title">
+        <div class="badge" aria-label="Conteúdo para maiores de 18 anos">18+</div>
+        <p class="eyebrow">Confirmação de idade</p>
+        <h1 id="age-title">Você tem <span>18 anos ou mais?</span></h1>
+        <p class="description">Para continuar, confirme que você é maior de idade.</p>
+
+        <div class="actions">
+          <a class="button button-primary" id="yes-link" href="continuar.html">Sim, tenho 18 anos ou mais <span aria-hidden="true">↗</span></a>
+          <a class="button button-secondary" href="menor-de-idade.html">Não, sou menor de idade</a>
+        </div>
+
+        <p class="fine-print">Ao continuar, você confirma que tem pelo menos 18 anos.</p>
+      </section>
+      <p class="footer">Acesso destinado somente a maiores de idade.</p>
+    </main>
+    <script src="script.js"></script>
+  </body>
+</html>
