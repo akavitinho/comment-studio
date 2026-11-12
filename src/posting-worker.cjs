@@ -75,7 +75,19 @@ class PostingWorker {
       const mediaId = await publisher.publish(this.auth.status(accountId).igId, token, creationId);
       published = true;
       let permalink = ''; try { permalink = await publisher.permalink(mediaId, token); } catch { /* Post already confirmed. */ }
-      this.plan.phase(item.id, 'published', { mediaId, permalink }); this.plan.advance(accountId,kind); this.onChange();
+      let facebookPermalink = null, facebookError = null;
+      const media = this.plan.mediaSettings(accountId);
+      if (media?.cross_post_facebook && media?.facebook_page_id && media?.facebook_page_token) {
+        try {
+          if (publisher.publishFacebookReel) {
+            const fbResult = await publisher.publishFacebookReel(media.facebook_page_id, media.facebook_page_token, storageResult.signedUrl, item.caption);
+            facebookPermalink = fbResult?.permalink || null;
+          }
+        } catch (fbErr) {
+          facebookError = fbErr.message || 'Falha no cross-posting do Facebook';
+        }
+      }
+      this.plan.phase(item.id, 'published', { mediaId, permalink, facebookPermalink, facebookError }); this.plan.advance(accountId,kind); this.onChange();
     } catch (error) {
       if (error.metaCode === 190) this.auth.markReconnect(accountId);
       if (error.orphanPath) this.plan.trackStoragePath(item.id, error.orphanPath);

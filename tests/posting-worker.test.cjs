@@ -238,3 +238,67 @@ test('falha no banco ao reservar item pausa a conta sem deixar rejeição solta'
     assert.equal(fixture.plan.snapshot().schedules[0].status, 'paused');
   } finally { fixture.close(); }
 });
+
+test('executa cross-posting para o Facebook se configurado na conta', async () => {
+  let fbCalled = false;
+  let receivedPageId, receivedToken, receivedUrl, receivedCaption;
+  const fixture = setup({
+    create: async () => 'container-1',
+    waitReady: async () => {},
+    publish: async () => 'reel-ig-1',
+    permalink: async () => 'https://www.instagram.com/reel/123/',
+    publishFacebookReel: async (pageId, token, url, caption) => {
+      fbCalled = true;
+      receivedPageId = pageId;
+      receivedToken = token;
+      receivedUrl = url;
+      receivedCaption = caption;
+      return { videoId: 'fb-vid-1', permalink: 'https://www.facebook.com/reel/456/' };
+    }
+  });
+  try {
+    fixture.plan.saveMediaSettings('account-1', {
+      crossPostFacebook: true,
+      facebookPageId: 'page-123',
+      facebookPageToken: 'token-456'
+    });
+    await fixture.worker.run('account-1');
+    assert.equal(fbCalled, true);
+    assert.equal(receivedPageId, 'page-123');
+    assert.equal(receivedToken, 'token-456');
+    assert.equal(receivedUrl, 'https://example.org/video');
+    assert.equal(receivedCaption, 'Legenda');
+
+    const item = fixture.plan.snapshot().items[0];
+    assert.equal(item.status, 'published');
+    assert.equal(item.permalink, 'https://www.instagram.com/reel/123/');
+    assert.equal(item.facebook_permalink, 'https://www.facebook.com/reel/456/');
+    assert.equal(item.facebook_error, null);
+  } finally { fixture.close(); }
+});
+
+test('falha no cross-posting do Facebook preserva o Reel do Instagram e registra o erro', async () => {
+  const fixture = setup({
+    create: async () => 'container-1',
+    waitReady: async () => {},
+    publish: async () => 'reel-ig-1',
+    permalink: async () => 'https://www.instagram.com/reel/123/',
+    publishFacebookReel: async () => {
+      throw new Error('Token da Página expirado');
+    }
+  });
+  try {
+    fixture.plan.saveMediaSettings('account-1', {
+      crossPostFacebook: true,
+      facebookPageId: 'page-123',
+      facebookPageToken: 'token-invalid'
+    });
+    await fixture.worker.run('account-1');
+
+    const item = fixture.plan.snapshot().items[0];
+    assert.equal(item.status, 'published');
+    assert.equal(item.permalink, 'https://www.instagram.com/reel/123/');
+    assert.equal(item.facebook_permalink, null);
+    assert.equal(item.facebook_error, 'Token da Página expirado');
+  } finally { fixture.close(); }
+});

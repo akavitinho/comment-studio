@@ -451,6 +451,7 @@
       if(item.status==='attention')actions.append(sharedButton('Tentar novamente',()=>window.studio.retryPostingVideo(item.id)));
       if(item.status==='uncertain')actions.append(sharedButton('Conferi: publicado',()=>window.studio.resolveUncertainPosting({id:item.id,outcome:'published'})),sharedButton('Conferi: não publicado',()=>window.studio.resolveUncertainPosting({id:item.id,outcome:'cancelled'})));
       if(item.permalink)actions.append(sharedButton('Abrir Reel',()=>window.studio.openPublishedReel(item.id)));
+      if(item.facebook_permalink)actions.append(sharedButton('Abrir Facebook',()=>window.studio.openPublishedFacebookReel(item.id)));
       tools.append(actions);if(actions.childElementCount)body.append(tools);
       row.append(thumb,body);return row;
     };
@@ -653,6 +654,61 @@
       });
       orderField.append(videoOrder, make('small', 'Sequência segue a ordem da fila. Aleatório sorteia um vídeo pendente a cada postagem.', 'posting-media-path'));
       mediaSection.append(orderField);
+
+      // Cross-posting Facebook
+      const fbCross = make('div', undefined, 'posting-facebook-cross');
+      const fbTitle = make('span', 'Cross-posting no Facebook', 'posting-media-label');
+      const fbToggleRow = make('label', undefined, 'posting-fb-toggle');
+      const fbCheck = make('input');
+      fbCheck.type = 'checkbox';
+      fbCheck.checked = Boolean(media.cross_post_facebook);
+      fbToggleRow.append(fbCheck, make('span', ' Publicar Reels também na Página do Facebook'));
+
+      const fbBox = make('div', undefined, 'posting-fb-box');
+      fbBox.hidden = !fbCheck.checked;
+
+      const fbPageIdLabel = make('label', undefined, 'posting-fb-field');
+      fbPageIdLabel.append(make('span', 'ID da Página do Facebook:'));
+      const fbPageIdInput = make('input');
+      fbPageIdInput.type = 'text';
+      fbPageIdInput.placeholder = 'Ex: 1049281048123';
+      fbPageIdInput.value = media.facebook_page_id || '';
+      fbPageIdLabel.append(fbPageIdInput);
+
+      const fbTokenLabel = make('label', undefined, 'posting-fb-field');
+      fbTokenLabel.append(make('span', 'Token de Acesso da Página (Page Access Token):'));
+      const fbTokenInput = make('input');
+      fbTokenInput.type = 'password';
+      fbTokenInput.placeholder = 'EAA...';
+      fbTokenInput.value = media.facebook_page_token || '';
+      fbTokenLabel.append(fbTokenInput);
+
+      const fbSaveBtn = button('Salvar configuração Facebook', async () => {
+        fbSaveBtn.disabled = true;
+        try {
+          const next = await window.studio.savePostingMediaSettings({
+            accountId: account.id,
+            crossPostFacebook: fbCheck.checked,
+            facebookPageId: fbPageIdInput.value,
+            facebookPageToken: fbTokenInput.value
+          });
+          clearError();
+          if (window.applyStudioState) window.applyStudioState(next); else window.renderPostings(next);
+        } catch (error) { showError(error); }
+        finally { fbSaveBtn.disabled = false; }
+      });
+
+      fbCheck.addEventListener('change', () => {
+        fbBox.hidden = !fbCheck.checked;
+        if (!fbCheck.checked) {
+          fbSaveBtn.click();
+        }
+      });
+
+      fbBox.append(fbPageIdLabel, fbTokenLabel, fbSaveBtn, make('small', 'Ao publicar no Instagram, o mesmo vídeo será enviado automaticamente como Reel para a Página do Facebook.', 'posting-media-path'));
+      fbCross.append(fbTitle, fbToggleRow, fbBox);
+      mediaSection.append(fbCross);
+
       card.append(mediaSection);
       const programming = make('section', undefined, 'posting-section posting-programming');
       programming.append(make('h3', 'Programação'));
@@ -741,6 +797,8 @@
         heading.append(identity);
         const actions = make('div', undefined, 'posting-item-quick-actions');
         if (item.permalink) actions.append(button('Abrir Reel', () => window.studio.openPublishedReel(item.id)));
+        if (item.facebook_permalink) actions.append(button('Abrir Facebook', () => window.studio.openPublishedFacebookReel(item.id)));
+        if (item.facebook_error) actions.append(make('small', `Facebook: ${item.facebook_error}`, 'posting-media-feedback'));
         if (item.status === 'attention') {
           actions.append(button('Tentar novamente', () => window.studio.retryPostingVideo(item.id)));
         }

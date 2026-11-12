@@ -50,8 +50,12 @@ class PostingPlan {
       CREATE TABLE IF NOT EXISTS media_insight_history (id INTEGER PRIMARY KEY AUTOINCREMENT, item_id TEXT NOT NULL, media_id TEXT NOT NULL, views INTEGER, reach INTEGER, fetched_at TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS media_insight_history_item_time ON media_insight_history(item_id, fetched_at);
       CREATE TABLE IF NOT EXISTS storage_objects (path TEXT PRIMARY KEY, item_id TEXT NOT NULL, account_id TEXT NOT NULL, uploaded_at TEXT NOT NULL);`);
-    this.db.exec("CREATE TABLE IF NOT EXISTS posting_media_settings (account_id TEXT PRIMARY KEY, folder TEXT, cover TEXT, video_order TEXT NOT NULL DEFAULT 'sequence')");
-    if (!this.db.prepare('PRAGMA table_info(posting_media_settings)').all().some(row => row.name === 'video_order')) this.db.exec("ALTER TABLE posting_media_settings ADD COLUMN video_order TEXT NOT NULL DEFAULT 'sequence'");
+    this.db.exec("CREATE TABLE IF NOT EXISTS posting_media_settings (account_id TEXT PRIMARY KEY, folder TEXT, cover TEXT, video_order TEXT NOT NULL DEFAULT 'sequence', cross_post_facebook INTEGER NOT NULL DEFAULT 0, facebook_page_id TEXT, facebook_page_token TEXT)");
+    const mediaCols = new Set(this.db.prepare('PRAGMA table_info(posting_media_settings)').all().map(row => row.name));
+    if (!mediaCols.has('video_order')) this.db.exec("ALTER TABLE posting_media_settings ADD COLUMN video_order TEXT NOT NULL DEFAULT 'sequence'");
+    if (!mediaCols.has('cross_post_facebook')) this.db.exec("ALTER TABLE posting_media_settings ADD COLUMN cross_post_facebook INTEGER NOT NULL DEFAULT 0");
+    if (!mediaCols.has('facebook_page_id')) this.db.exec("ALTER TABLE posting_media_settings ADD COLUMN facebook_page_id TEXT");
+    if (!mediaCols.has('facebook_page_token')) this.db.exec("ALTER TABLE posting_media_settings ADD COLUMN facebook_page_token TEXT");
     const columns = new Set(this.db.prepare('PRAGMA table_info(items)').all().map(row => row.name));
     if (!this.db.prepare('PRAGMA table_info(schedules)').all().some(row => row.name === 'group_id')) this.db.exec('ALTER TABLE schedules ADD COLUMN group_id TEXT');
     if (!columns.has('published_at')) this.db.exec('ALTER TABLE items ADD COLUMN published_at TEXT');
@@ -60,6 +64,8 @@ class PostingPlan {
     if (!columns.has('account_name')) this.db.exec('ALTER TABLE items ADD COLUMN account_name TEXT');
     if (!columns.has('queue_kind')) this.db.exec("ALTER TABLE items ADD COLUMN queue_kind TEXT NOT NULL DEFAULT 'account'");
     if (!columns.has('scheduled_at')) this.db.exec('ALTER TABLE items ADD COLUMN scheduled_at TEXT');
+    if (!columns.has('facebook_permalink')) this.db.exec('ALTER TABLE items ADD COLUMN facebook_permalink TEXT');
+    if (!columns.has('facebook_error')) this.db.exec('ALTER TABLE items ADD COLUMN facebook_error TEXT');
     this.db.exec('CREATE INDEX IF NOT EXISTS items_shared_agenda ON items(queue_kind,scheduled_at,account_id,status)');
     this.db.exec('INSERT OR IGNORE INTO storage_objects (path,item_id,account_id,uploaded_at) SELECT storage_path,id,account_id,uploaded_at FROM items WHERE storage_path IS NOT NULL AND uploaded_at IS NOT NULL');
     this.db.prepare("UPDATE schedules SET status='paused' WHERE status='running'").run();
@@ -72,17 +78,20 @@ class PostingPlan {
     return { schedules: this.db.prepare('SELECT * FROM schedules').all().map(row => ({ ...row, config: JSON.parse(row.config) })), sharedSchedules: this.db.prepare('SELECT * FROM shared_schedules').all(), mediaSettings: this.db.prepare('SELECT * FROM posting_media_settings').all(), items: this.db.prepare('SELECT * FROM items ORDER BY account_id, position, created_at').all(), attempts: this.db.prepare('SELECT * FROM attempts ORDER BY at DESC LIMIT 100').all(), insights: this.db.prepare('SELECT * FROM media_insights').all(), insightHistory: this.db.prepare('SELECT item_id,media_id,views,reach,fetched_at FROM media_insight_history ORDER BY fetched_at').all() };
   }
   mediaSettings(accountId) {
-    return this.db.prepare('SELECT folder,cover,video_order FROM posting_media_settings WHERE account_id=?').get(accountId) || { folder: null, cover: null, video_order: 'sequence' };
+    return this.db.prepare('SELECT folder,cover,video_order,cross_post_facebook,facebook_page_id,facebook_page_token FROM posting_media_settings WHERE account_id=?').get(accountId) || { folder: null, cover: null, video_order: 'sequence', cross_post_facebook: 0, facebook_page_id: null, facebook_page_token: null };
   }
   saveMediaSettings(accountId, changes) {
     const current = this.mediaSettings(accountId);
     const folder = changes.folder === undefined ? current.folder : changes.folder;
     const cover = changes.cover === undefined ? current.cover : changes.cover;
     const videoOrder = changes.videoOrder === undefined ? current.video_order : changes.videoOrder;
+    const crossPostFacebook = changes.crossPostFacebook === undefined ? (current.cross_post_facebook || 0) : (changes.crossPostFacebook ? 1 : 0);
+    const facebookPageId = changes.facebookPageId === undefined ? current.facebook_page_id : (changes.facebookPageId ? String(changes.facebookPageId).trim() : null);
+    const facebookPageToken = changes.facebookPageToken === undefined ? current.facebook_page_token : (changes.facebookPageToken ? String(changes.facebookPageToken).trim() : null);
     if (changes.folder !== undefined && folder !== null && (typeof folder !== 'string' || !path.isAbsolute(folder) || !fs.existsSync(folder) || !fs.statSync(folder).isDirectory())) throw new Error('Selecione uma pasta de vídeos existente.');
     if (changes.cover !== undefined && cover !== null && (typeof cover !== 'string' || !path.isAbsolute(cover) || !fs.existsSync(cover) || !fs.statSync(cover).isFile() || !/\.(jpe?g|png|webp)$/i.test(cover))) throw new Error('Selecione uma capa JPG, PNG ou WebP existente.');
     if (!['sequence', 'random'].includes(videoOrder)) throw new Error('Escolha Sequência ou Aleatório para a ordem dos vídeos.');
-    this.db.prepare('INSERT INTO posting_media_settings (account_id,folder,cover,video_order) VALUES (?,?,?,?) ON CONFLICT(account_id) DO UPDATE SET folder=excluded.folder,cover=excluded.cover,video_order=excluded.video_order').run(accountId, folder && path.resolve(folder), cover && path.resolve(cover), videoOrder);
+    this.db.prepare('INSERT INTO posting_media_settings (account_id,folder,cover,video_order,cross_post_facebook,facebook_page_id,facebook_page_token) VALUES (?,?,?,?,?,?,?) ON CONFLICT(account_id) DO UPDATE SET folder=excluded.folder,cover=excluded.cover,video_order=excluded.video_order,cross_post_facebook=excluded.cross_post_facebook,facebook_page_id=excluded.facebook_page_id,facebook_page_token=excluded.facebook_page_token').run(accountId, folder && path.resolve(folder), cover && path.resolve(cover), videoOrder, crossPostFacebook, facebookPageId, facebookPageToken);
     return this.snapshot();
   }
   importFolder(accountId, accountName = '') {
@@ -465,7 +474,7 @@ class PostingPlan {
     if (!['processing', 'publishing', 'published', 'queued', 'uncertain', 'attention', 'cancelled'].includes(phase)) throw new Error('Fase inválida.');
     const item = this.db.prepare('SELECT * FROM items WHERE id=?').get(itemId);
     if (!item) throw new Error('Vídeo não encontrado.');
-    this.db.prepare('UPDATE items SET status=?,creation_id=COALESCE(?,creation_id),media_id=COALESCE(?,media_id),permalink=COALESCE(?,permalink),storage_path=COALESCE(?,storage_path),uploaded_at=COALESCE(?,uploaded_at),error=?,published_at=? WHERE id=?').run(phase, fields.creationId || null, fields.mediaId || null, fields.permalink || null, fields.storagePath || null, fields.storagePath ? new Date().toISOString() : null, fields.error || null, phase === 'published' ? new Date().toISOString() : item.published_at, itemId);
+    this.db.prepare('UPDATE items SET status=?,creation_id=COALESCE(?,creation_id),media_id=COALESCE(?,media_id),permalink=COALESCE(?,permalink),storage_path=COALESCE(?,storage_path),uploaded_at=COALESCE(?,uploaded_at),error=?,published_at=?,facebook_permalink=COALESCE(?,facebook_permalink),facebook_error=? WHERE id=?').run(phase, fields.creationId || null, fields.mediaId || null, fields.permalink || null, fields.storagePath || null, fields.storagePath ? new Date().toISOString() : null, fields.error || null, phase === 'published' ? new Date().toISOString() : item.published_at, fields.facebookPermalink || null, fields.facebookError !== undefined ? fields.facebookError : item.facebook_error, itemId);
     if (fields.storagePath) this.db.prepare('INSERT OR IGNORE INTO storage_objects (path,item_id,account_id,uploaded_at) VALUES (?,?,?,?)').run(fields.storagePath, itemId, item.account_id, new Date().toISOString());
     this.db.prepare('INSERT INTO attempts (id,item_id,account_id,phase,at,detail) VALUES (?,?,?,?,?,?)').run(randomUUID(), itemId, item.account_id, phase, new Date().toISOString(), fields.error || null);
     return this.snapshot();

@@ -423,6 +423,7 @@ const handlers = {
   saveMetaSettings: async input => { if (postingWorker.active.size) throw new Error('Aguarde as publicações em andamento antes de alterar a Meta.'); await metaAuth.configure(input); return snapshot(); },
   savePostingStorage: input => { if (postingWorker.active.size) throw new Error('Aguarde as publicações em andamento antes de alterar o Storage.'); postingStorage.configure(input); return snapshot(); },
   openPublishedReel: async id => { const item = postingPlan.db.prepare('SELECT permalink FROM items WHERE id=? AND status=?').get(id, 'published'); const url = item?.permalink ? new URL(item.permalink) : null; if (!url || url.protocol !== 'https:' || !['instagram.com', 'www.instagram.com'].includes(url.hostname)) throw new Error('Link do Reel indisponível.'); await shell.openExternal(url.toString()); return true; },
+  openPublishedFacebookReel: async id => { const item = postingPlan.db.prepare('SELECT facebook_permalink FROM items WHERE id=? AND status=?').get(id, 'published'); const url = item?.facebook_permalink ? new URL(item.facebook_permalink) : null; if (!url || url.protocol !== 'https:' || !['facebook.com', 'www.facebook.com'].includes(url.hostname)) throw new Error('Link do Reel no Facebook indisponível.'); await shell.openExternal(url.toString()); return true; },
   postingProfilePicture: id => {
     const account = getAccount(id);
     const profile = metaAuth.status(id);

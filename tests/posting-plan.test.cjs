@@ -355,3 +355,26 @@ test('limite diário adia a segunda publicação para o próximo dia permitido',
   assert.equal(plan.snapshot().schedules[0].next_at, '2026-11-05T12:00:00.000Z');
   plan.close(); fs.rmSync(dir, { recursive: true, force: true });
 });
+test('salva configuracoes de cross-posting do Facebook e persiste permalink', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'studio-posting-facebook-'));
+  const video = path.join(dir, 'reel.mp4'); fs.writeFileSync(video, 'fake');
+  const plan = new PostingPlan(path.join(dir, 'postings.sqlite'));
+  try {
+    plan.saveMediaSettings('a', { crossPostFacebook: true, facebookPageId: '123456', facebookPageToken: 'secret-token' });
+    const settings = plan.mediaSettings('a');
+    assert.equal(settings.cross_post_facebook, 1);
+    assert.equal(settings.facebook_page_id, '123456');
+    assert.equal(settings.facebook_page_token, 'secret-token');
+
+    plan.add('a', video, 'Video com cross-post');
+    const id = plan.snapshot().items[0].id;
+    plan.phase(id, 'published', { permalink: 'https://www.instagram.com/reel/abc', facebookPermalink: 'https://www.facebook.com/reel/xyz' });
+
+    const item = plan.snapshot().items[0];
+    assert.equal(item.status, 'published');
+    assert.equal(item.permalink, 'https://www.instagram.com/reel/abc');
+    assert.equal(item.facebook_permalink, 'https://www.facebook.com/reel/xyz');
+  } finally {
+    plan.close(); fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

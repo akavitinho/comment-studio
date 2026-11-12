@@ -45,6 +45,78 @@ class MetaPublisher {
     const data = await this.call('GET', mediaId, token, { fields: 'permalink' });
     return data.permalink || '';
   }
+  async callFacebook(method, route, token, fields = {}, bodyJson = null, headers = {}) {
+    const url = route.startsWith('http') ? new URL(route) : new URL(`https://graph.facebook.com/${this.version}/${route}`);
+    if (method === 'GET') for (const [key, value] of Object.entries(fields)) url.searchParams.set(key, String(value));
+    let body;
+    const reqHeaders = { Authorization: `Bearer ${token}`, ...headers };
+    if (bodyJson !== null) {
+      reqHeaders['Content-Type'] = 'application/json';
+      body = JSON.stringify(bodyJson);
+    } else if (method === 'POST') {
+      reqHeaders['Content-Type'] = 'application/x-www-form-urlencoded';
+      body = new URLSearchParams(fields);
+    }
+    const response = await this.fetch(url, { method, headers: reqHeaders, ...(body !== undefined ? { body } : {}) });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || data.error) {
+      const code = Number(data.error?.code);
+      const error = new Error(`O Facebook recusou a operação${Number.isInteger(code) && code > 0 ? ` (código ${code})` : ''}: ${data.error?.message || response.statusText}`);
+      error.metaCode = code;
+      error.metaSubcode = Number(data.error?.error_subcode) || null;
+      error.metaMessage = String(data.error?.message || '');
+      error.transient = Boolean(data.error?.is_transient);
+      error.httpStatus = response.status;
+      throw error;
+    }
+    return data;
+  }
+  async createFacebookReel(pageId, pageToken) {
+    const data = await this.callFacebook('POST', `${pageId}/video_reels`, pageToken, {}, { upload_phase: 'start' });
+    if (!data.video_id) throw new Error('O Facebook não retornou o ID de preparação do Reel.');
+    return { videoId: data.video_id, uploadUrl: data.upload_url };
+  }
+  async uploadFacebookReelUrl(uploadUrl, pageToken, videoUrl) {
+    const response = await this.fetch(uploadUrl, {
+      method: 'POST',
+      headers: {
+        Authorization: `OAuth ${pageToken}`,
+        file_url: videoUrl
+      }
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || data.error || data.success === false) {
+      throw new Error(`Falha no upload do vídeo para o Facebook: ${data.error?.message || response.statusText}`);
+    }
+    return data;
+  }
+  async finishFacebookReel(pageId, pageToken, videoId, caption) {
+    const data = await this.callFacebook('POST', `${pageId}/video_reels`, pageToken, {}, {
+      upload_phase: 'finish',
+      video_id: videoId,
+      video_state: 'PUBLISHED',
+      description: caption
+    });
+    if (!data.success && !data.id) throw new Error('O Facebook não confirmou a publicação do Reel.');
+    return data.id || videoId;
+  }
+  async facebookPermalink(videoId, pageToken) {
+    try {
+      const data = await this.callFacebook('GET', videoId, pageToken, { fields: 'permalink_url' });
+      return data.permalink_url || `https://www.facebook.com/reel/${videoId}`;
+    } catch {
+      return `https://www.facebook.com/reel/${videoId}`;
+    }
+  }
+  async publishFacebookReel(pageId, pageToken, videoUrl, caption) {
+    const session = await this.createFacebookReel(pageId, pageToken);
+    if (session.uploadUrl) {
+      await this.uploadFacebookReelUrl(session.uploadUrl, pageToken, videoUrl);
+    }
+    const publishedId = await this.finishFacebookReel(pageId, pageToken, session.videoId, caption);
+    const permalink = await this.facebookPermalink(publishedId, pageToken);
+    return { videoId: publishedId, permalink };
+  }
   async insights(mediaId, token) {
     const data = await this.call('GET', `${mediaId}/insights`, token, { metric: 'views,reach' });
     const result = { views: null, reach: null };

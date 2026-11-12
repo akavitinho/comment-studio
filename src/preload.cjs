@@ -12,7 +12,7 @@ methods.push('pickPostingVideoFolder', 'savePostingMediaSettings', 'selectPostin
 methods.push('previewPostingSchedule');
 methods.push('saveMetaSettings', 'connectMeta', 'disconnectMeta');
 methods.push('savePostingStorage');
-methods.push('openPublishedReel');
+methods.push('openPublishedReel', 'openPublishedFacebookReel');
 methods.push('videoThumbnail');
 methods.push('postingCoverPreview');
 methods.push('postingProfilePicture');
