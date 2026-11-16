@@ -48,28 +48,6 @@ test('prepara a capa da conta no momento de postar, envia só o temporário e pr
   } finally { fixture.close(); }
 });
 
-test('fila única usa capa da conta e remove temporário após resultado incerto', async () => {
-  let coverUsed, preparedFile;
-  const fixture = setup({ create: async () => 'container', waitReady: async () => {}, publish: async () => { throw new Error('Resultado incerto.'); } }, {
-    prepareMedia: async (file, cover) => {
-      coverUsed = cover;
-      preparedFile = path.join(path.dirname(file), 'temporary.mp4'); fs.writeFileSync(preparedFile, 'prepared');
-      return { file: preparedFile, cleanup: () => fs.rmSync(preparedFile, { force: true }) };
-    }
-  });
-  try {
-    const original = fixture.plan.snapshot().items[0].file;
-    fixture.plan.addShared(['account-1'], [original], '');
-    fixture.plan.setSharedStatus('running', ['account-1']);
-    await fixture.worker.run('account-1', 'shared');
-    assert.equal(coverUsed, null);
-    assert.equal(fixture.uploadedFile, preparedFile);
-    assert.equal(fs.existsSync(preparedFile), false);
-    assert.equal(fs.existsSync(original), true);
-    assert.equal(fixture.plan.snapshot().items.find(item => item.queue_kind === 'shared').status, 'uncertain');
-  } finally { fixture.close(); }
-});
-
 test('falha no preparo não envia o original', async () => {
   const fixture = setup({ create: async () => { throw new Error('Não deveria criar mídia.'); } }, { prepareMedia: async () => { throw new Error('Falha ao preparar vídeo.'); } });
   try {
@@ -99,21 +77,6 @@ test('duas contas usam capas diferentes para o mesmo vídeo', async () => {
     await fixture.worker.run('account-1');
     await fixture.worker.run('account-2');
     assert.deepEqual(covers, [first, second]);
-  } finally { fixture.close(); }
-});
-
-test('fila única publica um vídeo atribuído sem consumir a fila individual',async()=>{
-  const fixture=setup({create:async()=> 'container-shared',waitReady:async()=>{},publish:async()=> 'media-shared',permalink:async()=> 'https://instagram.com/reel/shared'});
-  try {
-    const file=fixture.plan.snapshot().items[0].file;
-    fixture.plan.addShared(['account-1'],[file],'Compartilhada');
-    fixture.plan.setSharedStatus('running',['account-1']);
-    await fixture.worker.run('account-1','shared');
-    const state=fixture.plan.snapshot();
-    assert.equal(state.items.find(item=>item.queue_kind==='shared').status,'published');
-    assert.equal(state.items.find(item=>item.queue_kind==='account').status,'queued');
-    assert.equal(state.sharedSchedules[0].status,'stopped');
-    assert.equal(state.schedules[0].status,'running');
   } finally { fixture.close(); }
 });
 

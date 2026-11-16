@@ -235,7 +235,10 @@
         avatar.dataset.accountId = account.id;
         accountPhotoObserver.observe(avatar);
       }
-      name.append(avatar, element('span', '', `${profileLabel(account)} · ${platformName(account.platform)}`));
+      const copy=element('span','analytics-account-copy');
+      copy.append(element('span','',`${profileLabel(account)} · ${platformName(account.platform)}`));
+      const tags=accountTagGroup(account);if(tags)copy.append(tags);
+      name.append(avatar,copy);
       name.onclick = () => {
         const filter = document.querySelector('#dashboard-account'); filter.value = account.id;
         filter.dispatchEvent(new Event('change'));
@@ -362,8 +365,8 @@
     }
   };
   renderDashboardPlatforms = (items,histories) => {
-    const root=document.querySelector('#dashboard-platforms');root.replaceChildren();const selected=document.querySelector('#dashboard-platform').value,account=document.querySelector('#dashboard-account').value,dates=dashboardDates();
-    const results=['instagram','tiktok','x'].filter(p=>selected==='all'||selected===p).map(platform=>{const accounts=state.accounts.filter(a=>a.platform===platform&&(account==='all'||a.id===account));const ids=new Set(accounts.map(a=>a.id));let total=0,measured=0;
+    const root=document.querySelector('#dashboard-platforms');root.replaceChildren();const selected=document.querySelector('#dashboard-platform').value,dates=dashboardDates();
+    const results=['instagram','tiktok','x'].filter(p=>selected==='all'||selected===p).map(platform=>{const accounts=state.accounts.filter(a=>a.platform===platform&&dashboardAccountMatches(a.id,platform));const ids=new Set(accounts.map(a=>a.id));let total=0,measured=0;
       if(platform==='instagram')for(const item of items){const value=metricValue(histories.get(item.id)||[],'views');if(value!==null){total+=value;measured++;}}
       if(platform==='tiktok'){const videos=new Map();for(const point of state.tiktokInsights?.history||[]){const at=Date.parse(point.fetched_at);if(!ids.has(point.account_id)||at<dates.from||at>dates.to)continue;const key=`${point.account_id}:${point.video_id}`;if(!videos.has(key))videos.set(key,[]);videos.get(key).push(point);}for(const points of videos.values()){const value=metricValue(points,'views');if(value!==null){total+=value;measured++;}}}
       return {platform,accounts,total,measured};});const max=Math.max(1,...results.map(r=>r.total));

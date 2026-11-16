@@ -32,21 +32,24 @@ function parseRate(value) {
 }
 function generatePerturbations(width, height) {
   const factor = Math.max(0.5, Math.min(width, height) / 1080);
-  const maxCrop = Math.max(1, Math.round(6 * factor));
+  const maxCrop = Math.max(2, Math.round(10 * factor));
   const rand = (min, max) => min + Math.random() * (max - min);
   const randInt = (min, max) => Math.floor(rand(min, max + 0.999));
   return {
-    cropTop: randInt(1, maxCrop),
-    cropBottom: randInt(1, maxCrop),
-    cropLeft: randInt(1, maxCrop),
-    cropRight: randInt(1, maxCrop),
-    brightness: Number(rand(-0.03, 0.03).toFixed(4)),
-    contrast: Number(rand(0.97, 1.03).toFixed(4)),
-    saturation: Number(rand(0.95, 1.05).toFixed(4)),
-    hue: Number(rand(-3, 3).toFixed(2)),
-    speed: Number(rand(0.99, 1.01).toFixed(4)),
-    crf: randInt(18, 22),
-    gop: randInt(200, 350),
+    cropTop: randInt(2, maxCrop),
+    cropBottom: randInt(2, maxCrop),
+    cropLeft: randInt(2, maxCrop),
+    cropRight: randInt(2, maxCrop),
+    brightness: Number(rand(-0.04, 0.04).toFixed(4)),
+    contrast: Number(rand(0.96, 1.04).toFixed(4)),
+    saturation: Number(rand(0.93, 1.07).toFixed(4)),
+    hue: Number(rand(-4, 4).toFixed(2)),
+    speed: Number(rand(0.97, 1.03).toFixed(4)),
+    crf: randInt(17, 23),
+    gop: randInt(150, 400),
+    noise: randInt(2, 5),
+    trimStart: Number(rand(0.02, 0.12).toFixed(3)),
+    gamma: Number(rand(0.97, 1.03).toFixed(4)),
   };
 }
 function perturbFilter(p, width, height) {
@@ -56,8 +59,9 @@ function perturbFilter(p, width, height) {
     `crop=${cw}:${ch}:${p.cropLeft}:${p.cropTop}`,
     `scale=${width}:${height}:force_original_aspect_ratio=decrease:force_divisible_by=2:flags=lanczos`,
     `pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,setsar=1`,
-    `eq=brightness=${p.brightness}:contrast=${p.contrast}:saturation=${p.saturation}`,
+    `eq=brightness=${p.brightness}:contrast=${p.contrast}:saturation=${p.saturation}:gamma=${p.gamma || 1}`,
     `hue=h=${p.hue}`,
+    `noise=alls=${p.noise || 3}:allf=t`,
     `setpts=PTS/${p.speed}`,
   ].join(',');
 }
@@ -82,14 +86,24 @@ function buildArgs({ input, output, cover, coverSeconds, width, height, frameRat
   if (cover) {
     const milliseconds = Math.round(coverSeconds * 1000);
     const videoFilters = `[0:v]scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height},setsar=1,fps=${frameRate},trim=duration=${coverSeconds},setpts=PTS-STARTPTS[cover];[1:v]scale=${width}:${height}:force_original_aspect_ratio=decrease:force_divisible_by=2,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=${frameRate},setpts=PTS-STARTPTS[video];[cover][video]concat=n=2:v=1:a=0[vraw];[vraw]${vf}[v]`;
-    const filter = hasAudio ? `${videoFilters};[1:a]adelay=${milliseconds}:all=1,atempo=${p.speed}[a]` : videoFilters;
-    args = ['-hide_banner', '-y', '-loop', '1', '-framerate', String(frameRate), '-t', String(coverSeconds), '-i', cover, '-i', input, '-filter_complex', filter, '-map', '[v]'];
+    const filter = hasAudio ? `${videoFilters};[1:a]adelay=${milliseconds}:all=1,aresample=async=1:first_pts=0,atempo=${p.speed}[a]` : videoFilters;
+    const trimSS = p.trimStart ? ['-ss', String(p.trimStart)] : [];
+    args = ['-hide_banner', '-loglevel', 'error', '-y', '-loop', '1', '-framerate', String(frameRate), '-t', String(coverSeconds), '-i', cover, ...trimSS, '-i', input, '-filter_complex', filter, '-map', '[v]'];
     if (hasAudio) args.push('-map', '[a]');
   } else {
-    args = ['-hide_banner', '-y', '-i', input, '-map', '0:v:0', '-vf', vf];
-    if (hasAudio) args.push('-map', '0:a:0', '-af', `atempo=${p.speed}`);
+    const trimSS = p.trimStart ? ['-ss', String(p.trimStart)] : [];
+    args = ['-hide_banner', '-loglevel', 'error', '-y', ...trimSS, '-i', input, '-map', '0:v:0', '-vf', vf];
+    if (hasAudio) args.push('-map', '0:a:0', '-af', `aresample=async=1:first_pts=0,atempo=${p.speed}`);
   }
   return [...args, ...common, ...encoding, ...audio, '-fflags', '+bitexact', '-movflags', '+faststart', '-progress', 'pipe:1', '-nostats', output];
+}
+
+function videoFailureDetail(stderr, code) {
+  if (/no space left on device|not enough space on (?:the )?disk|disk full/i.test(stderr)) {
+    return 'Espaço insuficiente na pasta de saída. Libere espaço e tente novamente.';
+  }
+  const lines = stderr.split(/\r?\n/).map(line => line.trim()).filter(line => line && !/\bQavg:|^Conversion failed!$/i.test(line));
+  return lines.slice(-6).join(' ').slice(-1200) || `FFmpeg encerrou com código ${code}.`;
 }
 
 function imageOutputPathFor(input, outputDir) {
@@ -208,7 +222,7 @@ class MediaProcessor {
         if (code !== 0) fs.rmSync(options.output, { force: true });
         if (this.cancelled) reject(new Error('Processamento cancelado.'));
         else if (code === 0) resolve();
-        else reject(new Error(`Falha ao preparar ${path.basename(options.input)}. ${stderr.split(/\r?\n/).filter(Boolean).slice(-2).join(' ')}`));
+        else reject(new Error(`Falha ao preparar ${path.basename(options.input)}. ${videoFailureDetail(stderr, code)}`));
       });
     });
   }
@@ -275,4 +289,4 @@ class MediaProcessor {
   }
 }
 
-module.exports = { MediaProcessor, buildArgs, buildImageArgs, generatePerturbations, generateImagePerturbations, perturbFilter, outputPathFor, imageOutputPathFor, VIDEO_EXTENSIONS, IMAGE_EXTENSIONS, COVER_EXTENSIONS, REEL_WIDTH, REEL_HEIGHT };
+module.exports = { MediaProcessor, buildArgs, buildImageArgs, generatePerturbations, generateImagePerturbations, perturbFilter, outputPathFor, imageOutputPathFor, videoFailureDetail, VIDEO_EXTENSIONS, IMAGE_EXTENSIONS, COVER_EXTENSIONS, REEL_WIDTH, REEL_HEIGHT };

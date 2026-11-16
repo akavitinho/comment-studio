@@ -47,8 +47,6 @@ test('ordem dos vídeos migra como sequência e sorteia apenas a fila da conta q
     plan.saveMediaSettings('a', { videoOrder: 'random' });
     assert.throws(() => plan.saveMediaSettings('a', { videoOrder: 'other' }), /Sequência ou Aleatório/);
     assert.equal(path.basename(plan.claim('a', 'account', () => 0.99).file), 'three.mp4');
-    plan.addShared(['a'], [path.join(dir, 'shared-one.mp4'), path.join(dir, 'shared-two.mp4')], '');
-    assert.equal(path.basename(plan.claim('a', 'shared', () => 0.99).file), 'shared-one.mp4');
     const reopened = new PostingPlan(file);
     try { assert.equal(reopened.mediaSettings('a').video_order, 'random'); }
     finally { reopened.close(); }
@@ -66,12 +64,10 @@ test('limpar fila remove só pendentes da conta e para sua programação', () =>
     const items = plan.snapshot().items.filter(item => item.account_id === 'a');
     plan.phase(items[0].id, 'published', { mediaId: 'published-id' });
     plan.phase(items[1].id, 'attention', { error: 'Falha de arquivo' });
-    plan.addShared(['a'], [path.join(dir, 'other.mp4')], '');
     plan.setStatus('a', 'running');
     const result = plan.clearQueue('a');
     assert.equal(result.removedCount, 1);
-    assert.deepEqual(result.items.filter(item => item.account_id === 'a').map(item => item.status).sort(), ['attention', 'published', 'queued']);
-    assert.equal(result.items.find(item => item.account_id === 'a' && item.status === 'queued').queue_kind, 'shared');
+    assert.deepEqual(result.items.filter(item => item.account_id === 'a').map(item => item.status).sort(), ['attention', 'published']);
     assert.equal(result.items.find(item => item.account_id === 'b').status, 'queued');
     assert.equal(result.schedules.find(row => row.account_id === 'a').status, 'stopped');
     assert.equal(result.schedules.find(row => row.account_id === 'a').next_at, null);
@@ -96,50 +92,6 @@ test('Insights mantêm a leitura atual e registram histórico real sem preencher
 });
 
 const config = validateConfig({ minMinutes: 30, maxMinutes: 90, startMinute: 540, endMinute: 1080, days: [1, 2, 3, 4, 5], timeZone: 'America/Sao_Paulo', dailyLimit: 0 });
-test('fila única distribui cada vídeo uma vez e preserva horários independentes',()=>{
-  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'studio-shared-'));
-  const plan=new PostingPlan(path.join(dir,'postings.sqlite'));
-  try {
-    const rhythm={minMinutes:5,maxMinutes:5,startMinute:0,endMinute:1440,days:[0,1,2,3,4,5,6],timeZone:'America/Sao_Paulo'};
-    plan.configure('a',rhythm);plan.configure('b',rhythm);
-    const files=Array.from({length:4},(_,i)=>path.join(dir,`video-${i}.mp4`));files.forEach(file=>fs.writeFileSync(file,'fake'));
-    plan.addShared(['a','b'],files,'Legenda',{a:'Conta A',b:'Conta B'});
-    const items=plan.snapshot().items;
-    assert.equal(items.length,4);assert.equal(new Set(items.map(item=>item.file)).size,4);
-    assert.deepEqual(items.reduce((count,item)=>(count[item.account_id]=(count[item.account_id]||0)+1,count),{}),{a:2,b:2});
-    assert.ok(items.every(item=>item.queue_kind==='shared'));
-    plan.setSharedStatus('running',['a','b']);
-    assert.ok(plan.snapshot().schedules.every(row=>row.status==='stopped'));
-    const dueAt=new Date(Math.max(...plan.snapshot().sharedSchedules.map(row=>Date.parse(row.next_at)))+60000);
-    assert.equal(plan.due(dueAt).length,0);assert.equal(plan.dueShared(dueAt).length,2);
-    const claimed=plan.claim('a','shared');assert.equal(claimed.account_id,'a');assert.equal(claimed.queue_kind,'shared');
-    assert.equal(plan.snapshot().items.filter(item=>item.status==='uploading').length,1);
-    plan.close();
-    const resumed=new PostingPlan(path.join(dir,'postings.sqlite'));
-    assert.ok(resumed.snapshot().sharedSchedules.every(row=>row.status==='paused'));
-    resumed.close();
-  } finally { try{plan.close();}catch{} fs.rmSync(dir,{recursive:true,force:true}); }
-});
-test('publicação de uma fila adia a outra fila da mesma conta pelo intervalo mínimo',()=>{
-  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'studio-shared-gap-'));
-  const plan=new PostingPlan(path.join(dir,'postings.sqlite'));
-  try {
-    const rhythm={minMinutes:30,maxMinutes:30,startMinute:0,endMinute:1440,days:[0,1,2,3,4,5,6],timeZone:'America/Sao_Paulo',firstAt:'2026-11-07T00:00:00.000Z'};
-    plan.configure('a',rhythm);
-    const own=path.join(dir,'own.mp4'),shared=path.join(dir,'shared.mp4');fs.writeFileSync(own,'x');fs.writeFileSync(shared,'x');
-    plan.add('a',own,'');plan.addShared(['a'],[shared],'');
-    const now=new Date('2026-11-07T15:00:00.000Z');
-    plan.setStatus('a','running',new Date(now.getTime()-3600000));
-    plan.setSharedStatus('running',['a'],new Date(now.getTime()-3600000));
-    plan.db.prepare('UPDATE schedules SET next_at=? WHERE account_id=?').run(now.toISOString(),'a');
-    plan.db.prepare('UPDATE shared_schedules SET next_at=? WHERE account_id=?').run(now.toISOString(),'a');
-    const published=plan.snapshot().items.find(item=>item.queue_kind==='account');
-    plan.phase(published.id,'published',{mediaId:'m'});
-    plan.db.prepare('UPDATE items SET published_at=? WHERE id=?').run(now.toISOString(),published.id);
-    assert.equal(plan.dueShared(now).length,0);
-    assert.equal(plan.snapshot().sharedSchedules[0].next_at,new Date(now.getTime()+30*60000).toISOString());
-  } finally {plan.close();fs.rmSync(dir,{recursive:true,force:true});}
-});
 test('Insights persistem ligados ao ID confirmado do Reel', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'studio-posting-insights-'));
   const video = path.join(dir, 'reel.mp4'); fs.writeFileSync(video, 'fake');

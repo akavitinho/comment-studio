@@ -3,16 +3,18 @@ const {DatabaseSync}=require('node:sqlite');
 const {MetaPublisher}=require('../src/meta-publisher.cjs');
 const {InstagramAccountInsights}=require('../src/instagram-account-insights.cjs');
 const {officialAggregate,officialDisplayRange}=require('../src/ui/dashboard-analytics.js');
-test('dashboard keeps latest complete saved window while new accounts arrive',()=>{
+test('today uses each account latest saved reading as new collections arrive',()=>{
  const rows=[
   {account_id:'a',metric:'views',start_at:0,end_at:10,value:5},
   {account_id:'b',metric:'views',start_at:0,end_at:10,value:7},
   {account_id:'a',metric:'views',start_at:0,end_at:20,value:8}
  ];
  const prior={from:-20,to:0};
- assert.deepEqual(officialDisplayRange(rows,['a','b'],{from:0,to:20},prior,'today'),{current:{from:0,to:10},prior:{from:-86400000,to:10-86400000},cached:true});
+ assert.deepEqual(officialDisplayRange(rows,['a','b'],{from:0,to:20},prior,'today'),{current:{from:0,to:20},prior,cached:false});
+ assert.equal(officialAggregate(rows,['a','b'],{from:0,to:20},'views',true).value,15);
  rows.push({account_id:'b',metric:'views',start_at:0,end_at:20,value:9});
  assert.deepEqual(officialDisplayRange(rows,['a','b'],{from:0,to:20},prior,'today'),{current:{from:0,to:20},prior,cached:false});
+ assert.equal(officialAggregate(rows,['a','b'],{from:0,to:20},'views',true).value,17);
 });
 test('period reach requires an exact official query, not summed daily reach',()=>{
  const rows=[{account_id:'a',metric:'reach',start_at:0,end_at:10,value:50,fetched_at:20},{account_id:'a',metric:'reach',start_at:10,end_at:20,value:60,fetched_at:20}];
@@ -30,6 +32,18 @@ test('null never becomes zero, real zero is retained and revisions replace only 
  const rows=db.prepare('SELECT * FROM official_account_metrics').all();
  assert.equal(rows.length,4);assert.equal(officialAggregate(rows,['a'],{from:0,to:10},'views').value,0);
  store.saveMetrics('a',0,10,{views:null},40);assert.equal(db.prepare("SELECT fetched_at FROM official_account_metrics WHERE metric='views' AND end_at=10").get().fetched_at,20);db.close();
+});
+test('account ranking reads the latest saved window without collecting new metrics',()=>{
+ const db=new DatabaseSync(':memory:'),store=new InstagramAccountInsights(db);
+ store.saveMetrics('a',0,10,{views:120,reach:80},100);
+ store.saveMetrics('b',0,10,{views:50,reach:0},110);
+ store.saveMetrics('a',0,20,{views:200},120);
+ store.saveMetrics('removed',0,30,{views:999},130);
+ const ranking=store.latestRanking(['a','b']);
+ assert.deepEqual(ranking.views,{window:{from:0,to:20},values:{a:{value:200,fetchedAt:120},b:{value:50,fetchedAt:110}}});
+ assert.deepEqual(ranking.reach,{window:{from:0,to:10},values:{a:{value:80,fetchedAt:100},b:{value:0,fetchedAt:110}}});
+ assert.equal(store.latestRanking([]).views.window,null);
+ db.close();
 });
 test('dashboard loads five leading Reels first and all saved Reels on request',()=>{
  const db=new DatabaseSync(':memory:'),store=new InstagramAccountInsights(db);

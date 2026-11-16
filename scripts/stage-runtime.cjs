@@ -26,6 +26,7 @@ const ffprobe = commandPath('ffprobe.exe');
 stage(ffmpeg, 'ffmpeg.exe');
 stage(ffprobe, 'ffprobe.exe');
 stage(path.join(root, 'vendor', 'yt-dlp.exe'), 'yt-dlp.exe');
+stage(path.join(root, 'vendor', 'tls-helper.exe'), 'tls-helper.exe');
 const ffmpegRoot = path.dirname(path.dirname(ffmpeg));
 for (const name of ['LICENSE', 'README.txt']) {
   const source = path.join(ffmpegRoot, name);

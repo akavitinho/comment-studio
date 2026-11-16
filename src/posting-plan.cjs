@@ -18,6 +18,7 @@ function nextAllowed(after, config) {
   throw new Error('Não há horário permitido nos próximos oito dias.');
 }
 function validateConfig(input) {
+  if (input?.mode === 'fixed') return fixedConfig(input);
   const min = Number(input.minMinutes), max = Number(input.maxMinutes);
   if (!Number.isInteger(min) || !Number.isInteger(max) || min < 1 || max < min || max > 10080) throw new Error('Defina intervalo mínimo e máximo entre 1 minuto e 7 dias.');
   const startMinute = Number(input.startMinute), endMinute = Number(input.endMinute);
@@ -36,6 +37,33 @@ function validateConfig(input) {
 function nextTime(base, config, random = Math.random) {
   const minutes = config.minMinutes + Math.floor(random() * (config.maxMinutes - config.minMinutes + 1));
   return nextAllowed(new Date(base).getTime() + minutes * 60000, config);
+}
+const isFixed = config => config.mode === 'fixed';
+const localDate = (date, zone) => parts(date, zone).date;
+function localInstant(day, minute, zone) {
+  const target = Date.parse(`${day}T00:00:00.000Z`) + minute * 60000;
+  let at = target;
+  for (let i = 0; i < 4; i++) {
+    const actual = parts(new Date(at), zone);
+    const delta = (Date.parse(`${day}T00:00:00.000Z`) - Date.parse(`${actual.date}T00:00:00.000Z`)) / 60000 + minute - actual.minute;
+    if (!delta) return new Date(at).toISOString();
+    at += delta * 60000;
+  }
+  const actual = parts(new Date(at), zone);
+  return actual.date === day && actual.minute === minute ? new Date(at).toISOString() : null;
+}
+function fixedConfig(input) {
+  const times = input.times;
+  const variationMinutes = Number(input.variationMinutes);
+  if (!Array.isArray(times) || !times.length || times.some(time => typeof time !== 'string' || !/^([01]\d|2[0-3]):[0-5]\d$/.test(time))) throw new Error('Adicione ao menos um horário válido (HH:mm).');
+  if (!Number.isInteger(variationMinutes) || variationMinutes < 0 || variationMinutes > 1439) throw new Error('A variação deve ser um número inteiro de minutos entre 0 e 1439.');
+  const sorted = [...times].sort();
+  if (new Set(sorted).size !== sorted.length) throw new Error('Não repita o mesmo horário.');
+  const minutes = sorted.map(time => Number(time.slice(0, 2)) * 60 + Number(time.slice(3)));
+  if (minutes.some((minute, index) => index && minute - minutes[index - 1] <= variationMinutes * 2)) throw new Error('As janelas de variação dos horários não podem se sobrepor.');
+  const timeZone = String(input.timeZone || 'America/Sao_Paulo');
+  try { new Intl.DateTimeFormat('pt-BR', { timeZone }); } catch { throw new Error('Fuso horário inválido.'); }
+  return { mode: 'fixed', times: sorted, variationMinutes, timeZone };
 }
 class PostingPlan {
   constructor(file) {
@@ -67,15 +95,31 @@ class PostingPlan {
     if (!columns.has('facebook_permalink')) this.db.exec('ALTER TABLE items ADD COLUMN facebook_permalink TEXT');
     if (!columns.has('facebook_error')) this.db.exec('ALTER TABLE items ADD COLUMN facebook_error TEXT');
     this.db.exec('CREATE INDEX IF NOT EXISTS items_shared_agenda ON items(queue_kind,scheduled_at,account_id,status)');
+    this.db.exec(`CREATE TABLE IF NOT EXISTS fixed_posting_slots (account_id TEXT NOT NULL, local_date TEXT NOT NULL, minute INTEGER NOT NULL, planned_at TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', PRIMARY KEY(account_id,local_date,minute));
+      CREATE TABLE IF NOT EXISTS removed_shared_files (account_id TEXT NOT NULL, filename TEXT NOT NULL, PRIMARY KEY(account_id,filename));`);
+    const scheduleColumns = new Set(this.db.prepare('PRAGMA table_info(schedules)').all().map(row => row.name));
+    if (!scheduleColumns.has('slot_date')) this.db.exec('ALTER TABLE schedules ADD COLUMN slot_date TEXT');
+    if (!scheduleColumns.has('slot_minute')) this.db.exec('ALTER TABLE schedules ADD COLUMN slot_minute INTEGER');
+    this.db.prepare("UPDATE items SET status='uncertain' WHERE queue_kind='shared' AND status='publishing'").run();
+    this.db.prepare("UPDATE items SET status='queued' WHERE queue_kind='shared' AND status IN ('uploading','processing')").run();
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const obsolete = this.db.prepare("SELECT id,account_id,file FROM items WHERE queue_kind='shared' AND status='queued'").all();
+      const removed = this.db.prepare('INSERT OR IGNORE INTO removed_shared_files (account_id,filename) VALUES (?,?)');
+      const deleteItem = this.db.prepare('DELETE FROM items WHERE id=?');
+      for (const item of obsolete) { removed.run(item.account_id, path.basename(item.file).toLocaleLowerCase('pt-BR')); deleteItem.run(item.id); }
+      this.db.prepare("UPDATE shared_schedules SET status='stopped',next_at=NULL").run();
+      this.db.exec('COMMIT');
+    } catch (error) { this.db.exec('ROLLBACK'); throw error; }
     this.db.exec('INSERT OR IGNORE INTO storage_objects (path,item_id,account_id,uploaded_at) SELECT storage_path,id,account_id,uploaded_at FROM items WHERE storage_path IS NOT NULL AND uploaded_at IS NOT NULL');
     this.db.prepare("UPDATE schedules SET status='paused' WHERE status='running'").run();
     this.db.prepare("UPDATE shared_schedules SET status='paused' WHERE status='running'").run();
     this.db.prepare("UPDATE items SET status='uncertain' WHERE status='publishing'").run();
     this.db.prepare("UPDATE items SET status='queued' WHERE status IN ('uploading','processing')").run();
-    for (const {account_id:id} of this.db.prepare('SELECT account_id FROM shared_schedules').all()) this.replanShared(id);
+    for (const row of this.db.prepare("SELECT account_id,config FROM schedules WHERE json_extract(config,'$.mode')='fixed'").all()) this.scheduleFixed(row.account_id, new Date(), { preserve: true });
   }
   snapshot() {
-    return { schedules: this.db.prepare('SELECT * FROM schedules').all().map(row => ({ ...row, config: JSON.parse(row.config) })), sharedSchedules: this.db.prepare('SELECT * FROM shared_schedules').all(), mediaSettings: this.db.prepare('SELECT * FROM posting_media_settings').all(), items: this.db.prepare('SELECT * FROM items ORDER BY account_id, position, created_at').all(), attempts: this.db.prepare('SELECT * FROM attempts ORDER BY at DESC LIMIT 100').all(), insights: this.db.prepare('SELECT * FROM media_insights').all(), insightHistory: this.db.prepare('SELECT item_id,media_id,views,reach,fetched_at FROM media_insight_history ORDER BY fetched_at').all() };
+    return { schedules: this.db.prepare('SELECT * FROM schedules').all().map(row => ({ ...row, config: JSON.parse(row.config) })), mediaSettings: this.db.prepare('SELECT * FROM posting_media_settings').all(), items: this.db.prepare('SELECT * FROM items ORDER BY account_id, position, created_at').all(), attempts: this.db.prepare('SELECT * FROM attempts ORDER BY at DESC LIMIT 100').all(), insights: this.db.prepare('SELECT * FROM media_insights').all(), insightHistory: this.db.prepare('SELECT item_id,media_id,views,reach,fetched_at FROM media_insight_history ORDER BY fetched_at').all() };
   }
   mediaSettings(accountId) {
     return this.db.prepare('SELECT folder,cover,video_order,cross_post_facebook,facebook_page_id,facebook_page_token FROM posting_media_settings WHERE account_id=?').get(accountId) || { folder: null, cover: null, video_order: 'sequence', cross_post_facebook: 0, facebook_page_id: null, facebook_page_token: null };
@@ -94,13 +138,25 @@ class PostingPlan {
     this.db.prepare('INSERT INTO posting_media_settings (account_id,folder,cover,video_order,cross_post_facebook,facebook_page_id,facebook_page_token) VALUES (?,?,?,?,?,?,?) ON CONFLICT(account_id) DO UPDATE SET folder=excluded.folder,cover=excluded.cover,video_order=excluded.video_order,cross_post_facebook=excluded.cross_post_facebook,facebook_page_id=excluded.facebook_page_id,facebook_page_token=excluded.facebook_page_token').run(accountId, folder && path.resolve(folder), cover && path.resolve(cover), videoOrder, crossPostFacebook, facebookPageId, facebookPageToken);
     return this.snapshot();
   }
-  importFolder(accountId, accountName = '') {
+  importFolder(accountId, accountName = '', options = {}) {
     const folder = this.mediaSettings(accountId).folder;
     if (!folder || !fs.existsSync(folder) || !fs.statSync(folder).isDirectory()) throw new Error('Escolha uma pasta de vídeos existente para esta conta.');
     const collator = new Intl.Collator('pt-BR', { numeric: true, sensitivity: 'base' });
-    const files = fs.readdirSync(folder, { withFileTypes: true }).filter(entry => entry.isFile() && /\.(mp4|mov)$/i.test(entry.name)).map(entry => path.join(folder, entry.name)).sort((a, b) => collator.compare(path.basename(a), path.basename(b)) || a.localeCompare(b));
+    const files = fs.readdirSync(folder, { withFileTypes: true })
+      .filter(entry => entry.isFile() && /\.(mp4|mov)$/i.test(entry.name))
+      .map(entry => path.join(folder, entry.name))
+      .filter(file => !options.onlyFile || path.resolve(file).toLowerCase() === path.resolve(options.onlyFile).toLowerCase())
+      .filter(file => {
+        if (!options.minAgeMs) return true;
+        try { return Date.now() - fs.statSync(file).mtimeMs >= options.minAgeMs; }
+        catch { return false; }
+      })
+      .filter(file => !this.db.prepare('SELECT 1 FROM removed_shared_files WHERE account_id=? AND filename=?').get(accountId, path.basename(file).toLocaleLowerCase('pt-BR')))
+      .sort((a, b) => collator.compare(path.basename(a), path.basename(b)) || a.localeCompare(b));
     const existing = new Set(this.db.prepare("SELECT file FROM items WHERE account_id=? AND status<>'cancelled'").all(accountId).map(row => path.basename(row.file).toLocaleLowerCase('pt-BR')));
     const additions = files.filter(file => !existing.has(path.basename(file).toLocaleLowerCase('pt-BR')));
+    const result = () => ({ importedCount: additions.length, skippedCount: files.length - additions.length, ...(options.includeSnapshot === false ? {} : this.snapshot()) });
+    if (!additions.length) return result();
     let position = this.db.prepare('SELECT COALESCE(MAX(position),0) AS n FROM items WHERE account_id=?').get(accountId).n;
     this.db.exec('BEGIN IMMEDIATE');
     try {
@@ -108,7 +164,7 @@ class PostingPlan {
       for (const file of additions) insert.run(randomUUID(), accountId, String(accountName).slice(0, 120), file, '', ++position, new Date().toISOString());
       this.db.exec('COMMIT');
     } catch (error) { this.db.exec('ROLLBACK'); throw error; }
-    return { importedCount: additions.length, skippedCount: files.length - additions.length, ...this.snapshot() };
+    return result();
   }
   saveInsights(itemId, mediaId, values) {
     const item = this.db.prepare("SELECT media_id FROM items WHERE id=? AND status='published'").get(itemId);
@@ -121,20 +177,104 @@ class PostingPlan {
       this.db.exec('COMMIT');
     } catch (error) { this.db.exec('ROLLBACK'); throw error; }
   }
+  ensureFixedSlots(accountId, day, config, random = Math.random) {
+    const insert = this.db.prepare("INSERT OR IGNORE INTO fixed_posting_slots (account_id,local_date,minute,planned_at,status) VALUES (?,?,?,?,'pending')");
+    for (const time of config.times) {
+      const minute = Number(time.slice(0, 2)) * 60 + Number(time.slice(3));
+      if (this.db.prepare('SELECT 1 FROM fixed_posting_slots WHERE account_id=? AND local_date=? AND minute=?').get(accountId, day, minute)) continue;
+      const lower = Math.max(0, minute - config.variationMinutes);
+      const upper = Math.min(1439, minute + config.variationMinutes);
+      const chosen = lower + Math.floor(random() * (upper - lower + 1));
+      let planned = localInstant(day, chosen, config.timeZone);
+      if (!planned) continue;
+      const groupId = this.db.prepare('SELECT group_id FROM schedules WHERE account_id=?').get(accountId)?.group_id;
+      if (groupId) {
+        for (let i = 0; i < 1000; i++) {
+          const other = this.db.prepare('SELECT f.planned_at FROM fixed_posting_slots f JOIN schedules s ON s.account_id=f.account_id WHERE s.group_id=? AND f.account_id<>? AND f.local_date=?').all(groupId, accountId, day);
+          if (!other.some(row => Math.abs(Date.parse(row.planned_at) - Date.parse(planned)) < 5 * 60000)) break;
+          planned = new Date(Date.parse(planned) + 5 * 60000).toISOString();
+          if (localDate(new Date(planned), config.timeZone) !== day) throw new Error('Não há espaço para separar os horários das contas neste dia.');
+        }
+      }
+      insert.run(accountId, day, minute, planned);
+    }
+  }
+  scheduleFixed(accountId, now = new Date(), { preserve = false } = {}) {
+    const row = this.db.prepare('SELECT * FROM schedules WHERE account_id=?').get(accountId);
+    if (!row) return null;
+    const config = JSON.parse(row.config);
+    if (!isFixed(config)) return row.next_at;
+    const today = localDate(now, config.timeZone);
+    this.ensureFixedSlots(accountId, today, config);
+    const todaySlots = this.db.prepare("SELECT * FROM fixed_posting_slots WHERE account_id=? AND local_date=? AND status='pending' ORDER BY planned_at").all(accountId, today);
+    const publishedToday = this.db.prepare("SELECT published_at FROM items WHERE account_id=? AND status='published' AND published_at IS NOT NULL").all(accountId).filter(item => localDate(new Date(item.published_at), config.timeZone) === today).length;
+    const future = todaySlots.find(slot => Date.parse(slot.planned_at) > now.getTime() + 5 * 60000);
+    const due = todaySlots.find(slot => Date.parse(slot.planned_at) <= now.getTime() + 5 * 60000 && Date.parse(slot.planned_at) >= now.getTime() - 5 * 60000);
+    let selected = null, at = null;
+    if (publishedToday < config.times.length && preserve && row.next_at && row.slot_date === today && Date.parse(row.next_at) > now.getTime()) {
+      selected = this.db.prepare("SELECT * FROM fixed_posting_slots WHERE account_id=? AND local_date=? AND minute=? AND status IN ('pending','missed')").get(accountId, today, row.slot_minute);
+      at = row.next_at;
+    } else if (publishedToday < config.times.length && due) {
+      selected = due;
+      at = due.planned_at;
+    } else if (publishedToday < config.times.length && future) {
+      this.db.prepare("UPDATE fixed_posting_slots SET status='missed' WHERE account_id=? AND local_date=? AND status='pending' AND planned_at<?").run(accountId, today, now.toISOString());
+      selected = future;
+      at = future.planned_at;
+    } else {
+      this.db.prepare("UPDATE fixed_posting_slots SET status='missed' WHERE account_id=? AND local_date=? AND status='pending' AND planned_at<?").run(accountId, today, now.toISOString());
+      const missed = this.db.prepare("SELECT * FROM fixed_posting_slots WHERE account_id=? AND local_date=? AND status='missed' ORDER BY planned_at LIMIT 1").get(accountId, today);
+      if (publishedToday < config.times.length && missed && !future && !due) {
+        const last = this.db.prepare("SELECT MAX(published_at) AS at FROM items WHERE account_id=? AND status='published'").get(accountId)?.at;
+        const earliest = Math.max(now.getTime() + 5 * 60000, last ? Date.parse(last) + 3 * 3600000 : 0);
+        if (localDate(new Date(earliest), config.timeZone) === today) { selected = missed; at = new Date(earliest).toISOString(); }
+      }
+    }
+    if (!selected) {
+      let day = today;
+      for (let i = 0; i < 8 && !selected; i++) {
+        day = new Date(Date.parse(`${day}T00:00:00.000Z`) + 86400000).toISOString().slice(0, 10);
+        this.ensureFixedSlots(accountId, day, config);
+        selected = this.db.prepare("SELECT * FROM fixed_posting_slots WHERE account_id=? AND local_date=? AND status='pending' ORDER BY planned_at LIMIT 1").get(accountId, day);
+      }
+      at = selected?.planned_at || null;
+    }
+    this.db.prepare('UPDATE schedules SET next_at=?,slot_date=?,slot_minute=? WHERE account_id=?').run(at, selected?.local_date || null, selected?.minute ?? null, accountId);
+    return at;
+  }
   configure(accountId, input) {
     const config = validateConfig(input);
+    if (isFixed(config)) {
+      this.db.prepare("INSERT INTO schedules (account_id,config,status,next_at,group_id,slot_date,slot_minute) VALUES (?,?,'stopped',NULL,NULL,NULL,NULL) ON CONFLICT(account_id) DO UPDATE SET config=excluded.config,group_id=NULL,next_at=NULL,slot_date=NULL,slot_minute=NULL").run(accountId, JSON.stringify(config));
+      this.db.prepare("DELETE FROM fixed_posting_slots WHERE account_id=? AND status<>'used'").run(accountId);
+      this.scheduleFixed(accountId);
+      return this.snapshot();
+    }
     this.db.prepare("INSERT INTO schedules (account_id,config,status,next_at,group_id) VALUES (?,?,'stopped',NULL,NULL) ON CONFLICT(account_id) DO UPDATE SET config=excluded.config,group_id=NULL").run(accountId, JSON.stringify(config));
     const schedule = this.db.prepare('SELECT next_at FROM schedules WHERE account_id=?').get(accountId);
     if (schedule.next_at) {
       const next = nextAllowed(Math.max(Date.parse(schedule.next_at), Date.parse(config.firstAt)), config);
       this.db.prepare('UPDATE schedules SET next_at=? WHERE account_id=?').run(next, accountId);
     }
-    if (this.db.prepare('SELECT 1 FROM shared_schedules WHERE account_id=?').get(accountId)) this.replanShared(accountId, { force: true });
     return this.snapshot();
   }
   configureBatch(accountIds, input) {
     if (!Array.isArray(accountIds) || accountIds.length < 2 || new Set(accountIds).size !== accountIds.length) throw new Error('Selecione pelo menos duas contas diferentes.');
     const config = validateConfig(input);
+    if (isFixed(config)) {
+      const groupId = randomUUID();
+      this.db.exec('BEGIN IMMEDIATE');
+      try {
+        for (const id of accountIds) {
+          const prior = this.db.prepare('SELECT status FROM schedules WHERE account_id=?').get(id);
+          this.db.prepare('INSERT INTO schedules (account_id,config,status,next_at,group_id,slot_date,slot_minute) VALUES (?,?,?,NULL,?,NULL,NULL) ON CONFLICT(account_id) DO UPDATE SET config=excluded.config,group_id=excluded.group_id,next_at=NULL,slot_date=NULL,slot_minute=NULL').run(id, JSON.stringify(config), prior?.status || 'stopped', groupId);
+          this.db.prepare("DELETE FROM fixed_posting_slots WHERE account_id=? AND status<>'used'").run(id);
+          this.scheduleFixed(id);
+        }
+        this.db.exec('COMMIT');
+      } catch (error) { this.db.exec('ROLLBACK'); throw error; }
+      return this.snapshot();
+    }
     const groupId = randomUUID();
     const base = Math.max(Date.now(), Date.parse(config.firstAt));
     this.db.exec('BEGIN IMMEDIATE');
@@ -147,7 +287,6 @@ class PostingPlan {
       });
       this.db.exec('COMMIT');
     } catch (error) { this.db.exec('ROLLBACK'); throw error; }
-    for (const id of accountIds) if (this.db.prepare('SELECT 1 FROM shared_schedules WHERE account_id=?').get(id)) this.replanShared(id, { force: true });
     return this.snapshot();
   }
   groupSlot(candidate, config, groupId, accountId) {
@@ -165,6 +304,29 @@ class PostingPlan {
   }
   preview(accountId, input, count = 5) {
     const config = validateConfig(input);
+    if (isFixed(config)) {
+      const own = this.db.prepare('SELECT config FROM schedules WHERE account_id=?').get(accountId);
+      if (own && JSON.stringify(JSON.parse(own.config)) === JSON.stringify(config)) {
+        let day = localDate(new Date(), config.timeZone);
+        for (let i = 0; i < 8; i++) {
+          this.ensureFixedSlots(accountId, day, config);
+          day = new Date(Date.parse(`${day}T00:00:00.000Z`) + 86400000).toISOString().slice(0, 10);
+        }
+        return this.db.prepare("SELECT planned_at FROM fixed_posting_slots WHERE account_id=? AND status='pending' AND planned_at>? ORDER BY planned_at LIMIT ?").all(accountId, new Date().toISOString(), Math.min(20, count)).map(row => row.planned_at);
+      }
+      const result = [];
+      let day = localDate(new Date(), config.timeZone);
+      for (let i = 0; i < 8 && result.length < count; i++) {
+        for (const time of config.times) {
+          const minute = Number(time.slice(0, 2)) * 60 + Number(time.slice(3));
+          const at = localInstant(day, minute, config.timeZone);
+          if (at && Date.parse(at) > Date.now()) result.push(at);
+          if (result.length >= count) break;
+        }
+        day = new Date(Date.parse(`${day}T00:00:00.000Z`) + 86400000).toISOString().slice(0, 10);
+      }
+      return result;
+    }
     let at = nextAllowed(Math.max(Date.now(), new Date(config.firstAt).getTime()), config);
     const result = [at];
     for (let i = 1; i < Math.min(20, count); i++) { at = nextTime(at, config, () => 0.5); result.push(at); }
@@ -180,45 +342,6 @@ class PostingPlan {
     this.db.prepare('INSERT INTO items (id,account_id,account_name,file,caption,position,created_at) VALUES (?,?,?,?,?,?,?)').run(randomUUID(), accountId, String(accountName).slice(0, 120), file, caption, position, new Date().toISOString());
     return this.snapshot();
   }
-  addShared(accountIds, files, caption, accountNames = {}) {
-    if (!Array.isArray(accountIds) || !accountIds.length || new Set(accountIds).size !== accountIds.length) throw new Error('Selecione ao menos uma conta para a fila única.');
-    if (!Array.isArray(files) || !files.length) throw new Error('Selecione vídeos para a fila única.');
-    if (typeof caption !== 'string' || caption.length > 2200) throw new Error('A legenda deve ter até 2.200 caracteres.');
-    const existing = new Set(this.db.prepare("SELECT file FROM items WHERE queue_kind='shared' AND status<>'cancelled'").all().map(row => path.basename(row.file).toLocaleLowerCase('pt-BR')));
-    for (const file of files) {
-      if (!path.isAbsolute(file) || !fs.existsSync(file) || !fs.statSync(file).isFile() || !/\.(mp4|mov)$/i.test(file)) throw new Error('Selecione vídeos MP4 ou MOV existentes.');
-      const name = path.basename(file).toLocaleLowerCase('pt-BR');
-      if (existing.has(name)) throw new Error(`O vídeo ${path.basename(file)} já está na fila única.`);
-      existing.add(name);
-    }
-    const now = Date.now();
-    const accounts = accountIds.map(id => {
-      const schedule = this.db.prepare('SELECT config FROM schedules WHERE account_id=?').get(id);
-      if (!schedule) throw new Error('Configure os horários de todas as contas escolhidas antes de adicionar vídeos.');
-      const config = JSON.parse(schedule.config);
-      const shared = this.db.prepare('SELECT next_at FROM shared_schedules WHERE account_id=?').get(id);
-      const base = Math.max(now + 5 * 60000, Date.parse(config.firstAt), shared?.next_at ? Date.parse(shared.next_at) : 0);
-      let projected=nextAllowed(base,config);
-      const pending=this.db.prepare("SELECT COUNT(*) AS n FROM items WHERE account_id=? AND queue_kind='shared' AND status='queued'").get(id).n;
-      for(let i=0;i<pending;i++)projected=nextTime(projected,config,()=>0.5);
-      return { id, config, projected };
-    });
-    let position = this.db.prepare("SELECT COALESCE(MAX(position),0) AS n FROM items WHERE queue_kind='shared'").get().n;
-    this.db.exec('BEGIN IMMEDIATE');
-    try {
-      const insert = this.db.prepare("INSERT INTO items (id,account_id,account_name,file,caption,position,created_at,queue_kind) VALUES (?,?,?,?,?,?,?,'shared')");
-      for (const file of files) {
-        accounts.sort((a,b)=>Date.parse(a.projected)-Date.parse(b.projected)||a.id.localeCompare(b.id));
-        const target=accounts[0];
-        insert.run(randomUUID(),target.id,String(accountNames[target.id]||'').slice(0,120),file,caption,++position,new Date().toISOString());
-        this.db.prepare("INSERT OR IGNORE INTO shared_schedules (account_id,status,next_at) VALUES (?,'stopped',NULL)").run(target.id);
-        target.projected=nextTime(target.projected,target.config,()=>0.5);
-      }
-      this.db.exec('COMMIT');
-    } catch(error) { this.db.exec('ROLLBACK'); throw error; }
-    for (const id of accountIds) if (this.db.prepare("SELECT 1 FROM items WHERE account_id=? AND queue_kind='shared' AND status='queued'").get(id)) this.replanShared(id);
-    return this.snapshot();
-  }
   updateItem(id, changes) {
     const item = this.db.prepare('SELECT * FROM items WHERE id=?').get(id);
     if (!item || item.status !== 'queued') throw new Error('Só é possível editar vídeos ainda na fila.');
@@ -231,23 +354,18 @@ class PostingPlan {
   move(id, direction) {
     const item = this.db.prepare('SELECT * FROM items WHERE id=?').get(id);
     if (!item || item.status !== 'queued') throw new Error('Só é possível reordenar vídeos na fila.');
-    const rows = item.queue_kind==='shared'
-      ? this.db.prepare("SELECT id,account_id FROM items WHERE queue_kind='shared' AND status='queued' ORDER BY position,created_at").all()
-      : this.db.prepare("SELECT id,account_id FROM items WHERE account_id=? AND queue_kind='account' AND status='queued' ORDER BY position,created_at").all(item.account_id);
+    const rows = this.db.prepare("SELECT id,account_id FROM items WHERE account_id=? AND queue_kind='account' AND status='queued' ORDER BY position,created_at").all(item.account_id);
     const index = rows.findIndex(row => row.id === id), target = index + (direction === 'up' ? -1 : direction === 'down' ? 1 : 10000);
     if (target < 0 || target >= rows.length) return this.snapshot();
     [rows[index], rows[target]] = [rows[target], rows[index]];
     this.db.exec('BEGIN IMMEDIATE');
     try { const update = this.db.prepare('UPDATE items SET position=? WHERE id=?'); rows.forEach((row, i) => update.run(i + 1, row.id)); this.db.exec('COMMIT'); }
     catch (error) { this.db.exec('ROLLBACK'); throw error; }
-    if(item.queue_kind==='shared')for(const accountId of new Set([rows[index].account_id,rows[target].account_id]))this.replanShared(accountId,{force:true});
     return this.snapshot();
   }
   remove(id) {
-    const item=this.db.prepare('SELECT account_id,queue_kind FROM items WHERE id=? AND status=?').get(id,'queued');
     const result = this.db.prepare("DELETE FROM items WHERE id=? AND status='queued'").run(id);
     if (!result.changes) throw new Error('Só é possível remover vídeos ainda na fila.');
-    if(item?.queue_kind==='shared')this.replanShared(item.account_id,{force:true});
     return this.snapshot();
   }
   clearQueue(accountId) {
@@ -266,12 +384,11 @@ class PostingPlan {
     if (!this.db.prepare('SELECT 1 FROM schedules WHERE account_id=?').get(item.account_id)) throw new Error('Configure a programação desta conta antes de tentar novamente.');
     this.db.exec('BEGIN IMMEDIATE');
     try {
-      this.db.prepare("UPDATE items SET status='queued',error=NULL,creation_id=NULL WHERE id=? AND status='attention'").run(id);
-      this.db.prepare(`UPDATE ${item.queue_kind === 'shared' ? 'shared_schedules' : 'schedules'} SET status='paused' WHERE account_id=?`).run(item.account_id);
+      this.db.prepare("UPDATE items SET status='queued',queue_kind='account',scheduled_at=NULL,error=NULL,creation_id=NULL WHERE id=? AND status='attention'").run(id);
+      this.db.prepare("UPDATE schedules SET status='paused' WHERE account_id=?").run(item.account_id);
       this.db.prepare('INSERT INTO attempts (id,item_id,account_id,phase,at,detail) VALUES (?,?,?,?,?,?)').run(randomUUID(), id, item.account_id, 'manual_retry', new Date().toISOString(), 'Repetição solicitada pelo usuário antes da publicação.');
       this.db.exec('COMMIT');
     } catch (error) { this.db.exec('ROLLBACK'); throw error; }
-    if(item.queue_kind==='shared')this.replanShared(item.account_id,{force:true});
     return this.snapshot();
   }
   setStatus(accountId, status, now = new Date()) {
@@ -280,6 +397,11 @@ class PostingPlan {
     if (!schedule) throw new Error('Configure o ritmo antes de iniciar.');
     if (status === 'running' && !this.db.prepare("SELECT 1 FROM items WHERE account_id=? AND queue_kind='account' AND status='queued' LIMIT 1").get(accountId)) throw new Error('Adicione ao menos um vídeo à fila antes de iniciar.');
     const config = JSON.parse(schedule.config);
+    if (isFixed(config)) {
+      const next = status === 'running' ? this.scheduleFixed(accountId, now, { preserve: schedule.status === 'paused' }) : status === 'stopped' ? null : schedule.next_at;
+      this.db.prepare('UPDATE schedules SET status=?,next_at=? WHERE account_id=?').run(status, next, accountId);
+      return this.snapshot();
+    }
     const saved = schedule.next_at ? Date.parse(schedule.next_at) : NaN;
     const preservePausedTime = status === 'running' && schedule.status === 'paused' && Number.isFinite(saved) && saved > now.getTime() && allowed(new Date(saved), config);
     const next = status === 'running'
@@ -293,7 +415,6 @@ class PostingPlan {
     if (!selected.size) return this.snapshot();
     const schedules = this.db.prepare("SELECT account_id,config,next_at FROM schedules WHERE status='running' AND next_at IS NOT NULL").all();
     const reserved = schedules.filter(row => !selected.has(row.account_id)).map(row => Date.parse(row.next_at));
-    reserved.push(...this.db.prepare("SELECT next_at FROM shared_schedules WHERE status='running' AND next_at IS NOT NULL").all().map(row => Date.parse(row.next_at)));
     const pending = schedules.filter(row => selected.has(row.account_id)).sort((a, b) => Date.parse(a.next_at) - Date.parse(b.next_at) || a.account_id.localeCompare(b.account_id));
     const gap = gapMinutes * 60000;
     this.db.exec('BEGIN IMMEDIATE');
@@ -305,97 +426,44 @@ class PostingPlan {
         for (let attempt = 0; attempt < 10000; attempt++) {
           const conflict = reserved.find(slot => Number.isFinite(slot) && Math.abs(at - slot) < gap);
           if (conflict === undefined) break;
-          at = Date.parse(nextAllowed(conflict + gap, config));
+          at = isFixed(config) ? conflict + gap : Date.parse(nextAllowed(conflict + gap, config));
         }
         if (reserved.some(slot => Number.isFinite(slot) && Math.abs(at - slot) < gap)) throw new Error('Não há horários separados suficientes para iniciar as filas.');
-        if (at !== Date.parse(row.next_at)) update.run(new Date(at).toISOString(), row.account_id);
+        if (at !== Date.parse(row.next_at)) {
+          if (isFixed(config)) {
+            const slot = this.db.prepare('SELECT slot_date,slot_minute FROM schedules WHERE account_id=?').get(row.account_id);
+            if (localDate(new Date(at), config.timeZone) !== slot.slot_date) throw new Error('Não há espaço para separar os horários das contas neste dia.');
+            this.db.prepare('UPDATE fixed_posting_slots SET planned_at=? WHERE account_id=? AND local_date=? AND minute=?').run(new Date(at).toISOString(), row.account_id, slot.slot_date, slot.slot_minute);
+          }
+          update.run(new Date(at).toISOString(), row.account_id);
+        }
         reserved.push(at);
       }
       this.db.exec('COMMIT');
     } catch (error) { this.db.exec('ROLLBACK'); throw error; }
     return this.snapshot();
   }
-  replanShared(accountId, { force = false, from = null } = {}) {
-    const own=this.db.prepare('SELECT config FROM schedules WHERE account_id=?').get(accountId);
-    if (!own) return;
-    const config=JSON.parse(own.config),shared=this.db.prepare('SELECT * FROM shared_schedules WHERE account_id=?').get(accountId);
-    if (!shared) return;
-    const queued=this.db.prepare("SELECT id,scheduled_at FROM items WHERE account_id=? AND queue_kind='shared' AND status='queued' ORDER BY position,created_at").all(accountId);
-    if (!queued.length) { if(shared.status==='running')this.db.prepare("UPDATE shared_schedules SET status='stopped',next_at=NULL WHERE account_id=?").run(accountId);return; }
-    const active=this.db.prepare("SELECT scheduled_at FROM items WHERE account_id=? AND queue_kind='shared' AND status IN ('uploading','processing','publishing') ORDER BY position LIMIT 1").get(accountId);
-    let candidate=nextAllowed(Math.max(Date.parse(from||shared.next_at||new Date(Date.now()+5*60000).toISOString()),Date.parse(config.firstAt)),config);
-    if(active) candidate=nextTime(Math.max(Date.now(),Date.parse(active.scheduled_at||candidate)),config);
-    if(!allowed(new Date(candidate),config))candidate=nextAllowed(Date.parse(candidate),config);
-    const published=this.db.prepare("SELECT published_at FROM items WHERE account_id=? AND status='published' AND published_at IS NOT NULL").all(accountId);
-    const daily=new Map();for(const row of published){const day=parts(new Date(row.published_at),config.timeZone).date;daily.set(day,(daily.get(day)||0)+1);}
-    const update=this.db.prepare('UPDATE items SET scheduled_at=? WHERE id=?');
-    let previous=null;
-    for(let i=0;i<queued.length;i++){
-      const row=queued[i];
-      const earliest=previous?Date.parse(previous)+config.minMinutes*60000:Date.parse(candidate);
-      if(!force && !from && row.scheduled_at && Date.parse(row.scheduled_at)>=earliest && allowed(new Date(row.scheduled_at),config))candidate=row.scheduled_at;
-      let day=parts(new Date(candidate),config.timeZone).date;
-      while(config.dailyLimit && (daily.get(day)||0)>=config.dailyLimit){
-        let at=Date.parse(candidate);while(parts(new Date(at),config.timeZone).date===day)at+=3600000;
-        candidate=nextAllowed(at-59*60000,config);day=parts(new Date(candidate),config.timeZone).date;
-      }
-      update.run(candidate,row.id);daily.set(day,(daily.get(day)||0)+1);
-      if(i===0)this.db.prepare('UPDATE shared_schedules SET next_at=? WHERE account_id=?').run(candidate,accountId);
-      previous=candidate;
-      candidate=nextTime(candidate,config);
-    }
-  }
-  setSharedStatus(status, accountIds, now = new Date()) {
-    if (!['running','paused','stopped'].includes(status)) throw new Error('Estado inválido.');
-    const ids = accountIds || this.db.prepare('SELECT account_id FROM shared_schedules').all().map(row=>row.account_id);
-    for (const id of ids) {
-      const own=this.db.prepare('SELECT config FROM schedules WHERE account_id=?').get(id);
-      if (!own) throw new Error('Configure os horários da conta antes de iniciar a fila única.');
-      const shared=this.db.prepare('SELECT * FROM shared_schedules WHERE account_id=?').get(id);
-      if (!shared) continue;
-      if (status==='running' && !this.db.prepare("SELECT 1 FROM items WHERE account_id=? AND queue_kind='shared' AND status='queued' LIMIT 1").get(id)) continue;
-      const config=JSON.parse(own.config);
-      const saved=shared.next_at ? Date.parse(shared.next_at) : NaN;
-      const next=status==='running' ? Number.isFinite(saved)&&saved>now.getTime()&&allowed(new Date(saved),config) ? shared.next_at : nextAllowed(Math.max(now.getTime()+5*60000,Date.parse(config.firstAt)),config) : status==='stopped' ? null : shared.next_at;
-      this.db.prepare('UPDATE shared_schedules SET status=?,next_at=? WHERE account_id=?').run(status,next,id);
-      if(status==='running'){const force=!Number.isFinite(saved)||saved<=now.getTime()||!allowed(new Date(saved),config);this.replanShared(id,{force,from:force?next:null});}
-    }
-    return this.snapshot();
-  }
-  activateSharedOnly(accountIds, now = new Date()) {
-    this.db.exec('BEGIN IMMEDIATE');
-    try {
-      this.setSharedStatus('running', accountIds, now);
-      const paused = this.db.prepare("UPDATE schedules SET status='paused' WHERE status='running'").run().changes;
-      this.db.exec('COMMIT');
-      return paused;
-    } catch (error) {
-      this.db.exec('ROLLBACK');
-      throw error;
-    }
-  }
   cancelAccount(accountId, accountName = '') {
     this.db.prepare('DELETE FROM posting_media_settings WHERE account_id=?').run(accountId);
     this.db.prepare('UPDATE items SET account_name=? WHERE account_id=?').run(String(accountName).slice(0, 120), accountId);
     this.db.prepare("UPDATE items SET status='cancelled' WHERE account_id=? AND status='queued'").run(accountId);
     this.db.prepare("UPDATE schedules SET status='stopped',next_at=NULL WHERE account_id=?").run(accountId);
-    this.db.prepare("UPDATE shared_schedules SET status='stopped',next_at=NULL WHERE account_id=?").run(accountId);
   }
   resolveUncertain(itemId, outcome) {
     if (!['published', 'cancelled'].includes(outcome)) throw new Error('Resultado de conferência inválido.');
     const item = this.db.prepare("SELECT * FROM items WHERE id=? AND status='uncertain'").get(itemId);
     if (!item) throw new Error('Este vídeo não está aguardando conferência.');
     this.phase(itemId, outcome, { error: outcome === 'published' ? 'Publicação conferida manualmente; link indisponível.' : 'Publicação não confirmada; adicione o vídeo novamente somente se desejar.' });
-    if (outcome === 'published') this.advance(item.account_id,item.queue_kind);
+    if (outcome === 'published' && item.queue_kind === 'account') this.advance(item.account_id,'account');
     return this.snapshot();
   }
-  pauseAccount(accountId, kind = 'account') { this.db.prepare(`UPDATE ${kind === 'shared' ? 'shared_schedules' : 'schedules'} SET status='paused' WHERE account_id=?`).run(accountId); }
-  delayRetry(accountId, minutes, now = new Date(), kind = 'account') {
+  pauseAccount(accountId) { this.db.prepare("UPDATE schedules SET status='paused' WHERE account_id=?").run(accountId); }
+  delayRetry(accountId, minutes, now = new Date()) {
     const schedule = this.db.prepare('SELECT config FROM schedules WHERE account_id=?').get(accountId);
     if (!schedule) return;
-    const next = nextAllowed(now.getTime() + minutes * 60000, JSON.parse(schedule.config));
-    this.db.prepare(`UPDATE ${kind === 'shared' ? 'shared_schedules' : 'schedules'} SET next_at=? WHERE account_id=?`).run(next, accountId);
-    if(kind==='shared')this.replanShared(accountId,{force:true,from:next});
+    const config = JSON.parse(schedule.config);
+    const next = isFixed(config) ? new Date(now.getTime() + minutes * 60000).toISOString() : nextAllowed(now.getTime() + minutes * 60000, config);
+    this.db.prepare('UPDATE schedules SET next_at=? WHERE account_id=?').run(next, accountId);
   }
   clearStoragePath(itemId, objectPath) {
     if (objectPath) {
@@ -416,14 +484,24 @@ class PostingPlan {
     if (!last || now.getTime()-Date.parse(last)>=config.minMinutes*60000) return false;
     const next=nextAllowed(Date.parse(last)+config.minMinutes*60000,config);
     this.db.prepare(`UPDATE ${table} SET next_at=? WHERE account_id=?`).run(next,accountId);
-    if(table==='shared_schedules')this.replanShared(accountId,{force:true,from:next});
     return true;
   }
-  due(now = new Date()) {
+  due(now = new Date(), activeAccounts = new Set()) {
     const candidates = this.db.prepare("SELECT * FROM schedules WHERE status='running' AND next_at<=? ORDER BY next_at").all(now.toISOString());
     return candidates.filter(schedule => {
+      if (activeAccounts.has(schedule.account_id)) return false;
       if (!this.db.prepare("SELECT 1 FROM items WHERE account_id=? AND queue_kind='account' AND status='queued' LIMIT 1").get(schedule.account_id)) { this.db.prepare("UPDATE schedules SET status='stopped',next_at=NULL WHERE account_id=?").run(schedule.account_id); return false; }
       const config = JSON.parse(schedule.config);
+      if (isFixed(config)) {
+        const today = localDate(now, config.timeZone);
+        if (schedule.slot_date !== today || (Date.parse(schedule.next_at) < now.getTime() - 5 * 60000 && this.db.prepare("SELECT status FROM fixed_posting_slots WHERE account_id=? AND local_date=? AND minute=?").get(schedule.account_id, schedule.slot_date, schedule.slot_minute)?.status === 'pending')) {
+          this.scheduleFixed(schedule.account_id, now);
+          return false;
+        }
+        const count = this.db.prepare("SELECT published_at FROM items WHERE account_id=? AND status='published' AND published_at IS NOT NULL").all(schedule.account_id).filter(item => localDate(new Date(item.published_at), config.timeZone) === today).length;
+        if (count >= config.times.length) { this.scheduleFixed(schedule.account_id, now); return false; }
+        return true;
+      }
       if (!allowed(now, config)) {
         this.db.prepare('UPDATE schedules SET next_at=? WHERE account_id=?').run(nextAllowed(now.getTime(), config), schedule.account_id);
         return false;
@@ -446,25 +524,14 @@ class PostingPlan {
       return false;
     });
   }
-  dueShared(now = new Date()) {
-    const candidates=this.db.prepare("SELECT s.account_id,s.next_at,c.config FROM shared_schedules s JOIN schedules c ON c.account_id=s.account_id WHERE s.status='running' AND s.next_at<=? ORDER BY s.next_at").all(now.toISOString());
-    return candidates.filter(schedule=>{
-      const id=schedule.account_id,config=JSON.parse(schedule.config);
-      if(!this.db.prepare("SELECT 1 FROM items WHERE account_id=? AND queue_kind='shared' AND status='queued' LIMIT 1").get(id)){this.db.prepare("UPDATE shared_schedules SET status='stopped',next_at=NULL WHERE account_id=?").run(id);return false;}
-      if(!allowed(now,config)){this.replanShared(id,{force:true,from:nextAllowed(now.getTime(),config)});return false;}
-      if(this.accountGap(id,'shared_schedules',now,config))return false;
-      if(config.dailyLimit){const today=parts(now,config.timeZone).date;const published=this.db.prepare("SELECT published_at FROM items WHERE account_id=? AND status='published' AND published_at IS NOT NULL").all(id).filter(item=>parts(new Date(item.published_at),config.timeZone).date===today).length;
-        if(published>=config.dailyLimit){let later=now.getTime()+60000;while(parts(new Date(later),config.timeZone).date===today)later+=60000;this.replanShared(id,{force:true,from:nextAllowed(later,config)});return false;}}
-      return true;
-    });
-  }
   claim(accountId, kind = 'account', random = Math.random) {
+    if (kind !== 'account') throw new Error('Esta fila não está mais disponível.');
     this.db.exec('BEGIN IMMEDIATE');
     try {
       const randomOrder = kind === 'account' && this.mediaSettings(accountId).video_order === 'random';
       const queued = randomOrder ? this.db.prepare("SELECT * FROM items WHERE account_id=? AND queue_kind='account' AND status='queued' ORDER BY position,created_at").all(accountId) : null;
       const item = randomOrder ? queued[Math.floor(random() * queued.length)] : this.db.prepare("SELECT * FROM items WHERE account_id=? AND queue_kind=? AND status='queued' ORDER BY position,created_at LIMIT 1").get(accountId,kind);
-      if (!item) { this.db.prepare(`UPDATE ${kind === 'shared' ? 'shared_schedules' : 'schedules'} SET status='stopped',next_at=NULL WHERE account_id=?`).run(accountId); this.db.exec('COMMIT'); return null; }
+      if (!item) { this.db.prepare("UPDATE schedules SET status='stopped',next_at=NULL WHERE account_id=?").run(accountId); this.db.exec('COMMIT'); return null; }
       this.db.prepare("UPDATE items SET status='uploading',error=NULL WHERE id=?").run(item.id);
       this.db.prepare('INSERT INTO attempts (id,item_id,account_id,phase,at) VALUES (?,?,?,?,?)').run(randomUUID(), item.id, accountId, 'uploading', new Date().toISOString());
       this.db.exec('COMMIT'); return item;
@@ -480,16 +547,16 @@ class PostingPlan {
     return this.snapshot();
   }
   advance(accountId, kind = 'account', now = new Date()) {
+    if (kind !== 'account') throw new Error('Esta fila não está mais disponível.');
     const schedule = this.db.prepare('SELECT * FROM schedules WHERE account_id=?').get(accountId);
     if (!schedule) return;
-    const table=kind === 'shared' ? 'shared_schedules' : 'schedules';
+    const table='schedules';
+    const config = JSON.parse(schedule.config);
+    if (isFixed(config)) this.db.prepare("UPDATE fixed_posting_slots SET status='used' WHERE account_id=? AND local_date=? AND minute=?").run(accountId, schedule.slot_date, schedule.slot_minute);
     const remaining = this.db.prepare("SELECT 1 FROM items WHERE account_id=? AND queue_kind=? AND status='queued' LIMIT 1").get(accountId,kind);
     if (!remaining) { this.db.prepare(`UPDATE ${table} SET status='stopped',next_at=NULL WHERE account_id=?`).run(accountId); return; }
-    const config = JSON.parse(schedule.config);
-    if (kind === 'shared') {
-      const first=this.db.prepare("SELECT scheduled_at FROM items WHERE account_id=? AND queue_kind='shared' AND status='queued' ORDER BY position,created_at LIMIT 1").get(accountId);
-      if (!first.scheduled_at || Date.parse(first.scheduled_at)<now.getTime()+config.minMinutes*60000) this.replanShared(accountId,{force:true,from:nextAllowed(now.getTime()+config.minMinutes*60000,config)});
-      else this.db.prepare('UPDATE shared_schedules SET next_at=? WHERE account_id=?').run(first.scheduled_at,accountId);
+    if (isFixed(config)) {
+      this.scheduleFixed(accountId, now);
       return;
     }
     const next = this.groupSlot(nextTime(now, config), config, schedule.group_id, accountId);

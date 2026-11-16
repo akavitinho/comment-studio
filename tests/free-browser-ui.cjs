@@ -15,7 +15,7 @@ app.whenReady().then(async () => {
     const win = browser.window;
     assert.equal(await win.webContents.executeJavaScript("document.querySelector('#address').getAttribute('aria-label')"), 'Pesquisar ou digitar endereço');
     const size = win.contentView.children[0].getBounds();
-    assert.equal(size.y, 116);
+    assert.equal(size.y, 146);
     const site = win.contentView.children[0].webContents;
     assert.equal(site.session, ses, 'site uses the selected account or proxy session');
     const navigation = new Promise(resolve => site.once('did-start-navigation', (_event, url) => resolve(url)));

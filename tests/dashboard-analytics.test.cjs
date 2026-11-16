@@ -1,6 +1,83 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { hourlyLeaders, seriesBuckets, publicationBuckets, comparisonRange, comparisonVariation } = require('../src/ui/dashboard-analytics.js');
+const { hourlyLeaders, seriesBuckets, publicationBuckets, instagramHourlyActivity, comparisonRange, comparisonVariation, officialAggregate, officialDisplayRange } = require('../src/ui/dashboard-analytics.js');
+
+test('Instagram hourly activity keeps real posting hours and only measured Reel gains', () => {
+  const at = (day, hour) => new Date(2026, 10, day, hour, 10).toISOString();
+  const items = [
+    { id: 'one', account_id: 'ig', status: 'published', published_at: at(5, 9) },
+    { id: 'two', account_id: 'ig', status: 'published', published_at: at(5, 9) },
+    { id: 'other', account_id: 'other', status: 'published', published_at: at(5, 10) }
+  ];
+  const history = [
+    { item_id: 'one', fetched_at: at(4, 23), views: 10 },
+    { item_id: 'one', fetched_at: at(5, 10), views: 15 },
+    { item_id: 'one', fetched_at: at(5, 11), views: 15 },
+    { item_id: 'two', fetched_at: at(5, 10), views: 8 },
+    { item_id: 'other', fetched_at: at(5, 9), views: 1 },
+    { item_id: 'other', fetched_at: at(5, 10), views: 100 }
+  ];
+  const result = instagramHourlyActivity(items, history, ['ig'], +new Date(2026, 10, 5), +new Date(2026, 10, 6));
+  assert.equal(result[9].published, 2);
+  assert.equal(result[9].views, null);
+  assert.equal(result[10].views, 5);
+  assert.equal(result[11].views, 0);
+  assert.equal(result[11].intervals, 1);
+  assert.equal(result.reduce((total, hour) => total + hour.published, 0), 2);
+});
+
+test('today does not relabel yesterday after the local day changes', () => {
+  const day = 86400000, current = { from: day, to: day + 3600000 }, prior = { from: 0, to: 3600000 };
+  const rows = ['a', 'b'].map(account_id => ({ account_id, metric: 'views', start_at: 0, end_at: day, value: 10 }));
+  assert.deepEqual(officialDisplayRange(rows, ['a', 'b'], current, prior, 'today', '1970-1-2'), {
+    current, prior, cached: false
+  });
+  assert.equal(officialAggregate(rows, ['a', 'b'], current, 'views').value, null);
+  rows.push({ account_id: 'a', metric: 'views', start_at: day, end_at: current.to, value: 2 });
+  assert.deepEqual(officialDisplayRange(rows, ['a', 'b'], current, prior, 'today', '1970-1-2'), { current, prior, cached: false });
+  rows.push({ account_id: 'b', metric: 'views', start_at: day, end_at: current.to, value: 3 });
+  assert.deepEqual(officialDisplayRange(rows, ['a', 'b'], current, prior, 'today', '1970-1-2'), { current, prior, cached: false });
+});
+
+test('today shows the last UTC collection when it is still the same local day', () => {
+  const day = 86400000;
+  const current = { from: Date.UTC(2026, 10, 11), to: Date.UTC(2026, 10, 11, 1, 21) };
+  const prior = { from: current.from - day, to: current.to - day };
+  const rows = ['a', 'b'].map(account_id => ({ account_id, metric: 'views', start_at: prior.from, end_at: current.from, value: account_id === 'a' ? 20 : 30, fetched_at: current.to - 60000 }));
+  const display = officialDisplayRange(rows, ['a', 'b', 'c'], current, prior, 'today', '2026-11-10');
+  assert.deepEqual(display, { current: { from: prior.from, to: current.from }, prior: { from: prior.from - day, to: prior.from }, cached: true });
+  assert.deepEqual(officialAggregate(rows, ['a', 'b', 'c'], display.current, 'views', true), {
+    value: null, partialValue: 50, count: 2, latest: [current.to - 60000, current.to - 60000]
+  });
+  assert.deepEqual(officialDisplayRange(rows, ['a', 'b', 'c'], current, prior, 'today', '2026-11-11'), { current, prior, cached: false });
+  rows.push({ account_id: 'a', metric: 'views', start_at: current.from, end_at: current.to, value: 5 });
+  assert.deepEqual(officialDisplayRange(rows, ['a', 'b', 'c'], current, prior, 'today', '2026-11-10'), { current, prior, cached: false });
+});
+
+test('today sums the latest reading of each account even when collection times differ', () => {
+  const day = 86400000, current = { from: day, to: day + 3600000 };
+  const rows = [
+    { account_id: 'a', metric: 'views', start_at: 0, end_at: day, value: 900, fetched_at: day },
+    { account_id: 'a', metric: 'views', start_at: day, end_at: day + 1200000, value: 10, fetched_at: day + 1200000 },
+    { account_id: 'a', metric: 'views', start_at: day, end_at: day + 2400000, value: 25, fetched_at: day + 2400000 },
+    { account_id: 'b', metric: 'views', start_at: day, end_at: day + 2100000, value: 15, fetched_at: day + 2100000 },
+    { account_id: 'b', metric: 'views', start_at: day, end_at: day + 4200000, value: 30, fetched_at: day + 4200000 }
+  ];
+  assert.deepEqual(officialAggregate(rows, ['a', 'b'], current, 'views', true), {
+    value: 40, partialValue: 40, count: 2, latest: [day + 2400000, day + 2100000]
+  });
+  assert.equal(officialAggregate(rows, ['a', 'b', 'c'], current, 'views', true).value, null);
+  assert.equal(officialAggregate(rows, ['a', 'b', 'c'], current, 'views', true).partialValue, 40);
+});
+
+test('official dashboard prefers a recent complete seven-day collection to an old single day', () => {
+  const day = 86400000, current = { from: 7 * day, to: 13 * day + 3600000 };
+  const rows = ['a', 'b'].flatMap(account_id => [
+    { account_id, metric: 'views', start_at: 6 * day, end_at: 13 * day, value: 40 },
+    { account_id, metric: 'views', start_at: 7 * day, end_at: 8 * day, value: 5 }
+  ]);
+  assert.deepEqual(officialDisplayRange(rows, ['a', 'b'], current, { from: 0, to: 7 * day }, '7').current, { from: 6 * day, to: 13 * day });
+});
 
 test('percentage variation requires a positive comparable baseline', () => {
   assert.equal(comparisonVariation(24, 18).toFixed(1), '33.3');

@@ -4,7 +4,7 @@ const { pathToFileURL } = require('node:url');
 const { randomUUID } = require('node:crypto');
 const auditURL = pathToFileURL(path.join(__dirname, 'ui', 'fingerprint-audit.html')).href;
 
-const toolbarHeight = 116;
+const toolbarHeight = 146;
 let hub = null;
 
 function destination(input) {

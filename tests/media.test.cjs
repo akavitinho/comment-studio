@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { execFileSync, spawnSync } = require('node:child_process');
-const { MediaProcessor, buildArgs, buildImageArgs, generatePerturbations, generateImagePerturbations, perturbFilter, outputPathFor, imageOutputPathFor, IMAGE_EXTENSIONS } = require('../src/media.cjs');
+const { MediaProcessor, buildArgs, buildImageArgs, generatePerturbations, generateImagePerturbations, perturbFilter, outputPathFor, imageOutputPathFor, videoFailureDetail, IMAGE_EXTENSIONS } = require('../src/media.cjs');
 const { validateReel, isVerticalReel } = require('../src/posting-media.cjs');
 
 test('accepts legacy vertical files with harmless pixel rounding', () => {
@@ -12,6 +12,12 @@ test('accepts legacy vertical files with harmless pixel rounding', () => {
   assert.equal(isVerticalReel(604, 1074), true);
   assert.equal(isVerticalReel(540, 960), true);
   assert.equal(isVerticalReel(1920, 1080), false);
+});
+
+test('video conversion errors report the cause before FFmpeg summary lines', () => {
+  assert.match(videoFailureDetail('[out#0/mp4] Error writing trailer: No space left on device\n[aac] Qavg: 4639.282\nConversion failed!', 1), /Espaço insuficiente/);
+  assert.match(videoFailureDetail('[Parsed_crop_0] Invalid too big or non positive size\n[aac] Qavg: 4639.282\nConversion failed!', 1), /Invalid too big/);
+  assert.equal(videoFailureDetail('', 1), 'FFmpeg encerrou com código 1.');
 });
 
 test('media export removes metadata and prepends a cover without shell commands', () => {
@@ -33,12 +39,18 @@ test('perturbations generate unique random values per call', () => {
   const a = generatePerturbations(1920, 1080);
   const b = generatePerturbations(1920, 1080);
   assert.equal(typeof a.cropTop, 'number');
-  assert.equal(a.cropTop >= 1 && a.cropTop <= 6, true);
-  assert.equal(a.speed >= 0.99 && a.speed <= 1.01, true);
-  assert.equal(a.crf >= 18 && a.crf <= 22, true);
-  assert.equal(a.gop >= 200 && a.gop <= 350, true);
-  assert.equal(a.brightness >= -0.03 && a.brightness <= 0.03, true);
-  assert.equal(a.hue >= -3 && a.hue <= 3, true);
+  assert.equal(a.cropTop >= 2 && a.cropTop <= 10, true);
+  assert.equal(a.speed >= 0.97 && a.speed <= 1.03, true);
+  assert.equal(a.crf >= 17 && a.crf <= 23, true);
+  assert.equal(a.gop >= 150 && a.gop <= 400, true);
+  assert.equal(a.brightness >= -0.04 && a.brightness <= 0.04, true);
+  assert.equal(a.hue >= -4 && a.hue <= 4, true);
+  assert.equal(typeof a.noise, 'number', 'should have noise level');
+  assert.equal(a.noise >= 2 && a.noise <= 5, true);
+  assert.equal(typeof a.trimStart, 'number', 'should have trim offset');
+  assert.equal(a.trimStart >= 0.02 && a.trimStart <= 0.12, true);
+  assert.equal(typeof a.gamma, 'number', 'should have gamma');
+  assert.equal(a.gamma >= 0.97 && a.gamma <= 1.03, true);
   const keysA = JSON.stringify(a);
   const keysB = JSON.stringify(b);
   assert.notEqual(keysA, keysB, 'two runs should produce different values');
@@ -46,10 +58,10 @@ test('perturbations generate unique random values per call', () => {
 
 test('perturbations scale down for small resolutions', () => {
   const p = generatePerturbations(360, 640);
-  assert.equal(p.cropTop >= 1 && p.cropTop <= 3, true);
-  assert.equal(p.cropLeft >= 1 && p.cropLeft <= 3, true);
+  assert.equal(p.cropTop >= 2 && p.cropTop <= 5, true);
+  assert.equal(p.cropLeft >= 2 && p.cropLeft <= 5, true);
   const large = generatePerturbations(1920, 1080);
-  assert.equal(large.cropTop >= 1 && large.cropTop <= 6, true);
+  assert.equal(large.cropTop >= 2 && large.cropTop <= 10, true);
 });
 
 test('non-cover args include video and audio perturbation filters', () => {
@@ -59,10 +71,12 @@ test('non-cover args include video and audio perturbation filters', () => {
   assert.match(args[vfIndex + 1], /crop=iw-\d+:ih-\d+:\d+:\d+,scale=1080:1920:force_original_aspect_ratio=decrease/);
   assert.match(args[vfIndex + 1], /pad=1080:1920:\(ow-iw\)\/2:\(oh-ih\)\/2,setsar=1/);
   assert.match(args[vfIndex + 1], /eq=brightness=/);
+  assert.match(args[vfIndex + 1], /noise=alls=\d+:allf=t/, 'should have noise filter');
+  assert.match(args[vfIndex + 1], /gamma=/, 'should have gamma correction');
   assert.match(args[vfIndex + 1], /setpts=PTS\//);
   const afIndex = args.indexOf('-af');
   assert.notEqual(afIndex, -1);
-  assert.match(args[afIndex + 1], /^atempo=[\d.]+$/);
+  assert.match(args[afIndex + 1], /atempo=[\d.]+$/);
   assert.equal(args.includes('-g'), true, 'randomized GOP');
   assert.equal(args[args.indexOf('-maxrate') + 1], '23M');
   assert.equal(args[args.indexOf('-ar') + 1], '48000');

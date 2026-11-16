@@ -20,19 +20,57 @@ function proxy(input) {
   if (protocol === 'socks5' && (username || password)) throw new Error('Nesta versão, SOCKS5 aceita somente conexão sem usuário e senha.');
   return { id: randomUUID(), name: text(input.name, 'Nome'), protocol, host, port: number(input.port, 'Porta', 1, 65535), username, password };
 }
+function accountTags(value) {
+  if (value === undefined || value === null || value === '') return [];
+  const raw = typeof value === 'string' ? value.split(',') : value;
+  if (!Array.isArray(raw) || raw.some(tag => typeof tag !== 'string')) throw new Error('Informe as tags separadas por vírgula.');
+  const tags = [];
+  const seen = new Set();
+  for (const entry of raw) {
+    const tag = entry.trim().replace(/^#/, '').replace(/\s+/g, ' ');
+    if (!tag) continue;
+    if (tag.length > 40 || /[\u0000-\u001f\u007f,]/.test(tag)) throw new Error('Cada tag deve ter até 40 caracteres e não pode conter vírgula.');
+    const key = tag.toLocaleLowerCase('pt-BR');
+    if (seen.has(key)) continue;
+    seen.add(key); tags.push(tag);
+    if (tags.length > 12) throw new Error('Adicione no máximo 12 tags por conta.');
+  }
+  return tags;
+}
+function accountTagDefinition(input) {
+  const names = accountTags([input?.name]);
+  if (names.length !== 1) throw new Error('Informe o nome da tag.');
+  const color = String(input?.color || '');
+  if (!/^#[0-9a-f]{6}$/i.test(color)) throw new Error('Escolha uma cor válida para a tag.');
+  return { name: names[0], color: color.toLowerCase() };
+}
 function account(input, proxies) {
   const proxyId = input.proxyId || null;
   if (proxyId && !proxies.some(p => p.id === proxyId)) throw new Error('Proxy não encontrado.');
   const platform = input.platform || 'tiktok';
   if (!['tiktok', 'instagram', 'x'].includes(platform)) throw new Error('Plataforma inválida.');
-  return { id: randomUUID(), platform, name: text(input.name, 'Nome da conta'), handle: String(input.handle || '').trim().replace(/^@/, '').slice(0, 80), proxyId, createdAt: new Date().toISOString() };
+  const id = randomUUID();
+  const requestedName = String(input.name || '').trim();
+  const handle = String(input.handle || '').trim().replace(/^@/, '').slice(0, 80);
+  const nameAuto = platform === 'instagram' && (!requestedName || (handle && requestedName === handle) || /^(?:conta\d+|\d{1,3})$/i.test(requestedName));
+  const name = nameAuto && !requestedName ? `Instagram ${id.slice(0, 8)}` : text(input.name, 'Nome da conta');
+  return { id, platform, name, nameAuto, handle, proxyId, tags: accountTags(input.tags), createdAt: new Date().toISOString() };
 }
 function accountChanges(input, proxies) {
   const proxyId = input.proxyId || null;
   if (proxyId && !proxies.some(p => p.id === proxyId)) throw new Error('Proxy não encontrado.');
   const platform = input.platform || 'tiktok';
   if (!['tiktok', 'instagram', 'x'].includes(platform)) throw new Error('Plataforma inválida.');
-  return { platform, name: text(input.name, 'Nome da conta'), handle: String(input.handle || '').trim().replace(/^@/, '').slice(0, 80), proxyId };
+  return { platform, name: text(input.name, 'Nome da conta'), handle: String(input.handle || '').trim().replace(/^@/, '').slice(0, 80), proxyId, ...(Object.hasOwn(input, 'tags') ? { tags: accountTags(input.tags) } : {}) };
+}
+function applyInstagramIdentity(account, username) {
+  if (account.platform !== 'instagram' || typeof username !== 'string' || !/^[A-Za-z0-9._]{1,80}$/.test(username)) throw new Error('O Instagram retornou um usuário inválido.');
+  const previousHandle = account.handle;
+  const legacyName = account.nameAuto === undefined && ((previousHandle && account.name === previousHandle) || /^(?:conta\d+|\d{1,3})$/i.test(account.name));
+  const followsHandle = Boolean(account.nameAuto || legacyName);
+  account.handle = username;
+  if (followsHandle) { account.name = username; account.nameAuto = true; }
+  return account;
 }
 function campaign(input, accounts) {
   const targetType = input.targetType;
@@ -71,4 +109,4 @@ function campaign(input, accounts) {
     updatedAt: new Date().toISOString()
   };
 }
-module.exports = { proxy, account, accountChanges, campaign };
+module.exports = { proxy, account, accountChanges, applyInstagramIdentity, accountTags, accountTagDefinition, campaign };

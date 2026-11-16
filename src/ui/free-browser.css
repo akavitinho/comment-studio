@@ -7,3 +7,6 @@
 .browser-tab-select{min-width:0;height:29px;flex:1;padding:0 5px 0 11px;text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px}
 .browser-tab-close{width:25px;min-width:25px;height:25px;margin-right:3px;font-size:17px;line-height:1}
 #new-tab{height:28px;min-width:28px;font-size:19px}
+#favorites{height:30px;display:flex;align-items:center;gap:5px;padding:2px 12px;border-bottom:1px solid #e8e6eb;overflow-x:auto;white-space:nowrap}
+#favorites span{margin-right:4px;color:#817986;font-size:11px}
+#favorites button{height:25px;min-width:0;padding:0 9px;font-size:12px}

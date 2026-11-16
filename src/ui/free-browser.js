@@ -3,6 +3,12 @@ const status = document.querySelector('#status');
 const tabs = document.querySelector('#tabs');
 document.querySelector('#new-tab').addEventListener('click', () => window.freeBrowser.newTab());
 document.querySelector('#bar').addEventListener('submit', event => { event.preventDefault(); status.textContent = ''; window.freeBrowser.navigate(address.value); });
+document.querySelector('#favorites').addEventListener('click', event => {
+  const favorite = event.target.closest('button[data-url]');
+  if (!favorite) return;
+  status.textContent = '';
+  window.freeBrowser.navigate(favorite.dataset.url);
+});
 for (const action of ['back', 'forward', 'reload', 'home']) document.querySelector(`#${action}`).addEventListener('click', () => window.freeBrowser[action]());
 window.freeBrowser.onState(state => {
   tabs.replaceChildren();

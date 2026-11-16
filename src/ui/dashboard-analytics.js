@@ -71,6 +71,34 @@
     }
     return [...buckets].sort((a, b) => a[0] - b[0]);
   }
+  function instagramHourlyActivity(items, history, accountIds, from, to) {
+    const ids = new Set(accountIds);
+    const monitored = new Set(items.filter(item => ids.has(item.account_id)).map(item => item.id));
+    const hours = Array.from({ length: 24 }, (_, hour) => ({ hour, published: 0, views: null, intervals: 0 }));
+    for (const item of items) {
+      const at = Date.parse(item.published_at);
+      if (item.status === 'published' && ids.has(item.account_id) && at >= from && at < to) hours[new Date(at).getHours()].published++;
+    }
+    const series = new Map();
+    for (const point of history) {
+      if (!monitored.has(point.item_id)) continue;
+      if (!series.has(point.item_id)) series.set(point.item_id, []);
+      series.get(point.item_id).push(point);
+    }
+    for (const points of series.values()) {
+      points.sort((a, b) => Date.parse(a.fetched_at) - Date.parse(b.fetched_at));
+      for (let index = 1; index < points.length; index++) {
+        const previous = points[index - 1], current = points[index];
+        const start = Date.parse(previous.fetched_at), end = Date.parse(current.fetched_at);
+        const first = Number(previous.views), last = Number(current.views);
+        if (end < from || end >= to || end <= start || previous.views == null || current.views == null || !Number.isFinite(first) || !Number.isFinite(last) || last < first) continue;
+        const bucket = hours[new Date(end).getHours()];
+        bucket.views = (bucket.views || 0) + last - first;
+        bucket.intervals++;
+      }
+    }
+    return hours;
+  }
   function comparisonRange(dates, period, customFrom, customTo) {
     const from = Date.parse(customFrom || ''), to = Date.parse(customTo || '');
     if (Number.isFinite(from) && Number.isFinite(to) && from <= to) return { from, to };
@@ -103,22 +131,42 @@
     const previous = before.reduce((sum, row) => sum + (reels ? row.reels : row.views), 0);
     return { days, total, complete, delta: complete && beforeComplete ? comparisonVariation(total, previous) : null };
   }
-  function officialAggregate(rows, ids, range, key) {
-    const entries=ids.map(id=>rows.find(row=>row.account_id===id&&row.start_at===range.from&&row.end_at===range.to&&row.metric===key&&row.value!=null&&Number.isFinite(Number(row.value))));
+  function officialAggregate(rows, ids, range, key, latestPerAccount = false) {
+    // Today's background collection ends at a different second for each account.
+    const entries=ids.map(id=>{
+      const matching=rows.filter(row=>row.account_id===id&&row.start_at===range.from&&row.metric===key&&row.value!=null&&Number.isFinite(Number(row.value))&&(latestPerAccount?row.end_at>range.from&&row.end_at<=range.to:row.end_at===range.to));
+      return latestPerAccount?matching.sort((a,b)=>b.end_at-a.end_at||b.fetched_at-a.fetched_at)[0]:matching[0];
+    });
     const valid=entries.filter(Boolean);
     const partialValue=valid.length?valid.reduce((sum,row)=>sum+Number(row.value),0):null;
     return { value:ids.length&&valid.length===ids.length?partialValue:null,partialValue,count:valid.length,latest:valid.map(row=>row.fetched_at) };
   }
-  function officialDisplayRange(rows, ids, current, prior, period) {
-    const views=rows.filter(row=>ids.includes(row.account_id)&&row.metric==='views'&&row.start_at===current.from&&row.end_at<=current.to);
-    const ends=[...new Set(views.map(row=>row.end_at))].sort((a,b)=>b-a);
-    const complete=ends.find(end=>ids.length&&ids.every(id=>views.some(row=>row.account_id===id&&row.end_at===end)));
-    const end=complete||ends[0]||current.to;
-    const shown={from:current.from,to:end};
-    const shownPrior=end===current.to?prior:period==='today'?{from:shown.from-86400000,to:end-86400000}:{from:shown.from-(end-shown.from),to:shown.from};
-    return { current:shown, prior:shownPrior, cached:end!==current.to };
+  function officialDisplayRange(rows, ids, current, prior, period, localDayKey) {
+    if(period==='today'){
+      const local=new Date(current.to-1);
+      const localKey=localDayKey||`${local.getFullYear()}-${local.getMonth()+1}-${local.getDate()}`;
+      const previousUtc=new Date(prior.from);
+      const previousKey=`${previousUtc.getUTCFullYear()}-${previousUtc.getUTCMonth()+1}-${previousUtc.getUTCDate()}`;
+      const hasCurrent=rows.some(row=>ids.includes(row.account_id)&&row.metric==='views'&&row.start_at===current.from&&row.end_at>current.from&&row.end_at<=current.to);
+      if(!hasCurrent&&localKey===previousKey){
+        const ends=rows.filter(row=>ids.includes(row.account_id)&&row.metric==='views'&&row.start_at===prior.from&&row.end_at>prior.from&&row.end_at<=current.from).map(row=>row.end_at);
+        if(ends.length){
+          const shown={from:prior.from,to:Math.max(...ends)};
+          return {current:shown,prior:{from:shown.from-86400000,to:shown.to-86400000},cached:true};
+        }
+      }
+      return {current,prior,cached:false};
+    }
+    const starts=['7','30','90'].includes(period)?[current.from,current.from-86400000]:[current.from];
+    const views=rows.filter(row=>ids.includes(row.account_id)&&row.metric==='views'&&starts.includes(row.start_at)&&row.end_at<=current.to);
+    const windows=[...new Map(views.map(row=>[`${row.start_at}:${row.end_at}`,{from:row.start_at,to:row.end_at}])).values()]
+      .sort((a,b)=>b.to-a.to||b.from-a.from);
+    const complete=windows.find(window=>ids.length&&ids.every(id=>views.some(row=>row.account_id===id&&row.start_at===window.from&&row.end_at===window.to)));
+    const shown=complete||windows[0]||current;
+    const shownPrior=shown.from===current.from&&shown.to===current.to?prior:period==='today'?{from:shown.from-86400000,to:shown.to-86400000}:{from:shown.from-(shown.to-shown.from),to:shown.from};
+    return { current:shown, prior:shownPrior, cached:shown.from!==current.from||shown.to!==current.to };
   }
-  const api = { hourlyLeaders, observedChanges, seriesBuckets, publicationBuckets, bucketTime, comparisonRange, comparisonVariation, accountDailySummary, officialAggregate, officialDisplayRange };
+  const api = { hourlyLeaders, observedChanges, seriesBuckets, publicationBuckets, instagramHourlyActivity, bucketTime, comparisonRange, comparisonVariation, accountDailySummary, officialAggregate, officialDisplayRange };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else scope.dashboardAnalytics = api;
 })(typeof window === 'undefined' ? globalThis : window);

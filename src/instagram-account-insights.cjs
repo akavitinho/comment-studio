@@ -49,6 +49,20 @@ class InstagramAccountInsights {
       followers: ids.flatMap(id => this.db.prepare('SELECT * FROM official_followers WHERE account_id=? ORDER BY fetched_at DESC LIMIT 2').all(id))
     };
   }
+  latestRanking(ids) {
+    const result = {};
+    for (const metric of ['views', 'reach']) {
+      const latest = ids.length ? this.db.prepare(`SELECT start_at,end_at,fetched_at FROM official_account_metrics WHERE metric=? AND account_id IN (${ids.map(() => '?').join(',')}) ORDER BY fetched_at DESC,end_at DESC LIMIT 1`).get(metric,...ids) : null;
+      if (!latest) { result[metric] = { window: null, values: {} }; continue; }
+      const endDay = Math.floor((latest.end_at - 1) / DAY);
+      const values = {};
+      for (const row of this.db.prepare('SELECT account_id,value,fetched_at,end_at FROM official_account_metrics WHERE metric=? AND start_at=? AND end_at>? AND end_at<=? ORDER BY fetched_at DESC,end_at DESC').all(metric,latest.start_at,endDay*DAY,(endDay+1)*DAY)) {
+        if (ids.includes(row.account_id) && !Object.hasOwn(values,row.account_id)) values[row.account_id] = { value: row.value, fetchedAt: row.fetched_at };
+      }
+      result[metric] = { window: { from: latest.start_at, to: latest.end_at }, values };
+    }
+    return result;
+  }
   status(id) { return this.db.prepare('SELECT * FROM account_insight_status WHERE account_id=?').get(id); }
   setStatus(id, status, breakdown, retryAt = 0, message = '') {
     this.db.prepare('INSERT INTO account_insight_status VALUES (?,?,?,?,?) ON CONFLICT(account_id) DO UPDATE SET status=excluded.status,breakdown=excluded.breakdown,retry_at=excluded.retry_at,message=excluded.message').run(id, status, breakdown ? 1 : 0, retryAt, message);

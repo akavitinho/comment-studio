@@ -1,7 +1,7 @@
 {
   "name": "tiktok-comment-manager",
   "productName": "Comment Studio",
-  "version": "0.2.12",
+  "version": "0.2.14",
   "private": true,
   "description": "Aplicativo local com contas, proxies e campanhas TikTok com execução controlada.",
   "main": "src/main.cjs",

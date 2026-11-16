@@ -58,6 +58,42 @@ test('conta exige referência a proxy existente', () => {
   assert.throws(() => domain.campaign(validCampaign, [{ id: 'one', platform: 'x' }]), /TikTok/);
   assert.throws(() => domain.account({ name: 'Conta', platform: 'other' }, []), /Plataforma/);
 });
+test('Instagram preenche o nick ao conectar e preserva nomes personalizados', () => {
+  const automatic = domain.account({ platform: 'instagram', name: '' }, []);
+  assert.match(automatic.name, /^Instagram [a-f0-9]{8}$/);
+  assert.equal(automatic.nameAuto, true);
+  domain.applyInstagramIdentity(automatic, 'perfil.novo');
+  assert.equal(automatic.name, 'perfil.novo');
+  assert.equal(automatic.handle, 'perfil.novo');
+  domain.applyInstagramIdentity(automatic, 'perfil.atualizado');
+  assert.equal(automatic.name, 'perfil.atualizado');
+  automatic.name = 'conta007'; automatic.nameAuto = false;
+  domain.applyInstagramIdentity(automatic, 'outro.usuario');
+  assert.equal(automatic.name, 'conta007', 'nome editado manualmente não muda na reconexão');
+  const custom = domain.account({ platform: 'instagram', name: 'Minha loja' }, []);
+  domain.applyInstagramIdentity(custom, 'loja.oficial');
+  assert.equal(custom.name, 'Minha loja');
+  assert.equal(custom.handle, 'loja.oficial');
+  const legacy = domain.account({ platform: 'instagram', name: 'nome.antigo', handle: 'nome.antigo' }, []);
+  domain.applyInstagramIdentity(legacy, 'nome.novo');
+  assert.equal(legacy.name, 'nome.novo');
+  const numbered = domain.account({ platform: 'instagram', name: 'conta002' }, []);
+  domain.applyInstagramIdentity(numbered, 'perfil.oficial');
+  assert.equal(numbered.name, 'perfil.oficial');
+  assert.equal(numbered.handle, 'perfil.oficial');
+  assert.throws(() => domain.account({ platform: 'tiktok', name: '' }, []), /Nome da conta/);
+  assert.throws(() => domain.applyInstagramIdentity(custom, 'nome inválido'), /inválido/);
+});
+test('tags da conta são normalizadas e preservadas em edições sem alteração de tags', () => {
+  const created = domain.account({ name: 'Conta', tags: ' #Moda, humor, moda, Campanha A ' }, []);
+  assert.deepEqual(created.tags, ['Moda', 'humor', 'Campanha A']);
+  assert.equal(Object.hasOwn(domain.accountChanges({ name: 'Conta' }, []), 'tags'), false);
+  assert.deepEqual(domain.accountChanges({ name: 'Conta', tags: '' }, []).tags, []);
+  assert.throws(() => domain.account({ name: 'Conta', tags: 'x'.repeat(41) }, []), /40 caracteres/);
+  assert.throws(() => domain.account({ name: 'Conta', tags: Array.from({ length: 13 }, (_, index) => `tag${index}`) }, []), /12 tags/);
+  assert.deepEqual(domain.accountTagDefinition({ name: ' #Moda ', color: '#Aa22CC' }), { name: 'Moda', color: '#aa22cc' });
+  assert.throws(() => domain.accountTagDefinition({ name: 'Moda', color: 'red' }), /cor válida/);
+});
 test('dados persistem e arquivo corrompido não é silenciosamente substituído', () => {
   const scratch = path.join(__dirname, '..', '.smoke');
   fs.mkdirSync(scratch, { recursive: true });

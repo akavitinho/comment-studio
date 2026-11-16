@@ -8,12 +8,36 @@
   const number=value=>value==null?'—':Number(value).toLocaleString('pt-BR');
   const dateTime=at=>new Date(at).toLocaleString('pt-BR',{dateStyle:'short',timeStyle:'short'});
   const shortDay=at=>new Date(at).toLocaleDateString('pt-BR',{timeZone:'UTC',day:'2-digit',month:'2-digit'});
-  const aggregate=(rows,ids,range,key)=>window.dashboardAnalytics.officialAggregate(rows,ids,range,key);
-  let ticket=0,metric='views',compare=true,rangeKey='',rangeNow=0,displayKey='',reelSort='views',reelAll=null,reelVisible=5,legacyOpen=false;
+  const aggregate=(rows,ids,range,key)=>window.dashboardAnalytics.officialAggregate(rows,ids,range,key,document.querySelector('#dashboard-period').value==='today'&&range.to-range.from<=DAY);
+  let ticket=0,metric='views',compare=true,rangeKey='',rangeNow=0,rangeLocalDay='',displayKey='',renderKey='',reelSort='views',reelAll=null,reelVisible=5,activityDay='';
+  const localDay=()=>{const date=new Date();return `${date.getFullYear()}-${date.getMonth()+1}-${date.getDate()}`;};
+  const accountPhotos=new Map(),reelThumbnails=new Map();
+  function cachedImage(cache,id,target,load){
+    let entry=cache.get(id);
+    if(entry?.src){const img=element('img');img.alt='';img.src=entry.src;target.replaceChildren(img);return;}
+    if(!entry){
+      entry={src:null,promise:null};cache.set(id,entry);
+      entry.promise=Promise.resolve().then(load).then(src=>{
+        if(!src){cache.delete(id);return null;}
+        entry.src=src;
+        if(cache.size>150)cache.delete(cache.keys().next().value);
+        return src;
+      }).catch(()=>{cache.delete(id);return null;});
+    }
+    entry.promise.then(src=>{
+      if(!src||!target.isConnected)return;
+      const img=element('img');img.alt='';
+      img.onload=()=>{if(target.isConnected)target.replaceChildren(img);};
+      img.src=src;
+    });
+  }
   function ranges(){
     const period=document.querySelector('#dashboard-period').value;
     const key=[period,document.querySelector('#dashboard-from').value,document.querySelector('#dashboard-to').value,document.querySelector('#dashboard-compare-from')?.value,document.querySelector('#dashboard-compare-to')?.value].join(':');
-    if(key!==rangeKey){rangeKey=key;rangeNow=Math.floor(Date.now()/60000)*60000;}
+    const nowMinute=Math.floor(Date.now()/60000)*60000,day=localDay();
+    if(key!==rangeKey||day!==rangeLocalDay||Math.floor(rangeNow/DAY)!==Math.floor(nowMinute/DAY)||(period==='today'&&rangeNow!==nowMinute)){
+      rangeKey=key;rangeLocalDay=day;rangeNow=nowMinute;
+    }
     const now=rangeNow,today=Math.floor(now/DAY)*DAY;
     let from,to;
     if(period==='custom'){from=Date.parse(`${document.querySelector('#dashboard-from').value}T00:00:00Z`);to=Math.min(now,Date.parse(`${document.querySelector('#dashboard-to').value}T00:00:00Z`)+DAY);}
@@ -25,32 +49,53 @@
     if(Number.isFinite(customFrom)&&Number.isFinite(customTo)&&customFrom<customTo&&customTo<=from)prior={from:customFrom,to:customTo};
     return [{from,to},prior];
   }
+  function activityRange(){
+    const period=document.querySelector('#dashboard-period').value,now=new Date(rangeNow||Date.now()),today=new Date(now);
+    today.setHours(0,0,0,0);
+    let from=new Date(today),to=+now+1;
+    if(period==='custom'){
+      from=new Date(`${document.querySelector('#dashboard-from').value}T00:00:00`);
+      const last=new Date(`${document.querySelector('#dashboard-to').value}T00:00:00`);
+      last.setDate(last.getDate()+1);to=Math.min(to,+last);
+    }else if(period==='yesterday'){
+      from.setDate(from.getDate()-1);to=+today;
+    }else if(period==='24h')from=new Date(+now-DAY);
+    else if(period!=='today')from.setDate(from.getDate()-Number(period)+1);
+    return {from:+from,to};
+  }
   window.instagramOfficialRanges=ranges;
   document.querySelector('#dashboard-refresh-insights').addEventListener('click',()=>{rangeKey='';ranges();},true);
   const photoObserver=new IntersectionObserver(entries=>{
     for(const {target,isIntersecting} of entries){if(!isIntersecting)continue;photoObserver.unobserve(target);
-      window.studio.postingProfilePicture?.(target.dataset.accountId).then(src=>{if(!src||!target.isConnected)return;const img=element('img');img.src=src;img.alt='';target.replaceChildren(img);}).catch(()=>{});
+      cachedImage(accountPhotos,target.dataset.accountId,target,()=>window.studio.postingProfilePicture?.(target.dataset.accountId));
     }
   });
   function portrait(account){
     const avatar=element('span','official-avatar',(account.handle||account.name||'?').replace(/^@/,'').slice(0,1).toUpperCase());
     avatar.dataset.accountId=account.id;
-    if(account.meta?.connected)photoObserver.observe(avatar);
+    if(account.meta?.connected){
+      if(accountPhotos.get(account.id)?.src)cachedImage(accountPhotos,account.id,avatar);
+      else photoObserver.observe(avatar);
+    }
     return avatar;
   }
-  function status(root,rows,ids,result,range,cached){
+  function status(root,rows,ids,result,range,cached,requested){
     const views=aggregate(rows,ids,range,'views');
     const coverageComplete=views.count===ids.length&&result.authorizedIds.length===ids.length;
     const partialDay=range.to%DAY!==0;
     const quality=!views.count?'Indisponível':coverageComplete&&!partialDay?'Completo':'Parcial';
     const latest=views.latest.length?Math.min(...views.latest):null;
     const bar=element('div','official-status');
-    bar.append(element('span',`official-quality quality-${quality.toLowerCase()}`,quality),element('span','',latest?`Atualizado em ${dateTime(latest)}`:'Sem coleta para este período'));
-    if(cached)bar.append(element('span','official-stale','Exibindo a última coleta salva'));
+    bar.append(element('span',`official-quality quality-${quality.toLowerCase()}`,quality),element('span','',latest?`Atualizado em ${dateTime(latest)}`:document.querySelector('#dashboard-period').value==='today'?'Sem totais de hoje':'Sem coleta para este período'));
+    if(cached){
+      const first=shortDay(range.from),last=shortDay(range.to-1);
+      const previous=`coleta de ${first}${first===last?'':` a ${last}`}`;
+      bar.append(element('span','official-stale',requested.from>=range.to?`Sem dados de ${shortDay(requested.from)}; exibindo ${previous}`:`Exibindo ${previous}`));
+    }
     if(quality==='Parcial')bar.append(element('span','official-warning',coverageComplete?'O último dia do período ainda é parcial.':'Algumas contas não têm dados compatíveis neste período.'));
     root.append(bar);
   }
-  function cards(root,rows,ids,current,prior,followers){
+  function cards(root,rows,ids,current,prior,followers,requested){
     const grid=element('div','official-cards');
     for(const key of Object.keys(labels)){
       if(key==='profile_views'&&!rows.some(row=>ids.includes(row.account_id)&&row.metric===key))continue;
@@ -66,19 +111,25 @@
     if(followers.length){
       const latest=ids.map(id=>followers.filter(row=>row.account_id===id).sort((a,b)=>b.fetched_at-a.fetched_at)[0]);
       const complete=ids.length&&latest.every(Boolean);
-      const total=complete?latest.reduce((sum,row)=>sum+row.value,0):null;
+      const available=latest.filter(Boolean);
+      const total=available.length?available.reduce((sum,row)=>sum+row.value,0):null;
       const card=element('div','official-card'),heading=element('div','official-card-heading');
       const icon=element('span','official-icon',icons.followers);icon.setAttribute('aria-hidden','true');heading.append(icon,element('span','','Seguidores'));
-      card.append(heading,element('strong','',number(total)),element('small','',complete?(ids.length>1?'Soma por conta · última leitura':'Última leitura disponível'):'Dados incompletos'));
+      card.append(heading,element('strong','',number(total)),element('small','',complete?(ids.length>1?'Soma por conta · última leitura':'Última leitura disponível'):`Parcial: ${available.length} de ${ids.length} contas`));
       if(complete)card.title=`Seguidores consultados em ${dateTime(Math.min(...latest.map(row=>row.fetched_at)))}. ${ids.length>1?'A soma não representa pessoas únicas.':''}`;
       grid.append(card);
     }
+    const posted=(state.postings?.items||[]).filter(item=>ids.includes(item.account_id)&&item.status==='published'&&Date.parse(item.published_at)>=requested.from&&Date.parse(item.published_at)<requested.to).length;
+    const postCard=element('div','official-card');
+    const postHeading=element('div','official-card-heading');postHeading.append(element('span','official-icon','▣'),element('span','','Reels publicados'));
+    postCard.append(postHeading,element('strong','',number(posted)),element('small','','Registrados pelo Comment Studio neste período'));
+    grid.append(postCard);
     root.append(grid);
   }
-  function graph(root,rows,ids,current,prior){
+  function graph(root,rows,ids,current,prior,cached=false){
     const section=element('section','dashboard-panel official-graph');
     const head=element('div','official-section-head'),title=element('div');
-    title.append(element('h2','','Evolução do Instagram'));
+    title.append(element('h2','','Evolução diária da conta'));
     const select=element('select');select.setAttribute('aria-label','Métrica da evolução');
     for(const [key,label] of Object.entries(labels))if(key==='views'||rows.some(row=>ids.includes(row.account_id)&&row.metric===key))select.append(new Option(label,key));
     if(![...select.options].some(option=>option.value===metric))metric='views';
@@ -91,8 +142,17 @@
     const days=Math.ceil((current.to-current.from)/DAY);
     if(days<=1||document.querySelector('#dashboard-period').value==='24h'){
       const compact=element('div','official-day-view');
-      compact.append(element('span','',days===1?'Total diário da Meta':'Total do intervalo da Meta'),element('strong','',number(currentTotal.value??currentTotal.partialValue)),element('small','',currentTotal.value==null&&currentTotal.count?`Parcial: ${currentTotal.count} de ${ids.length} contas`:delta==null?'Sem comparação compatível':`${delta>=0?'+':''}${delta.toLocaleString('pt-BR',{maximumFractionDigits:1})}% vs. período anterior`));
-      section.append(compact,element('p','official-chart-note','A API não forneceu pontos horários para este total.'));root.append(section);return;
+      compact.append(element('span','',document.querySelector('#dashboard-period').value==='today'?(cached?'Último dia disponível · UTC':'Hoje · última leitura por conta'):days===1?'Total diário da Meta':'Total do intervalo da Meta'),element('strong','',number(currentTotal.value??currentTotal.partialValue)),element('small','',currentTotal.value==null&&currentTotal.count?`Parcial: ${currentTotal.count} de ${ids.length} contas`:delta==null?'Sem comparação compatível':`${delta>=0?'+':''}${delta.toLocaleString('pt-BR',{maximumFractionDigits:1})}% vs. período anterior`));
+      const value=currentTotal.value??currentTotal.partialValue;
+      if(value!=null){
+        const ns='http://www.w3.org/2000/svg',svg=document.createElementNS(ns,'svg');
+        svg.setAttribute('viewBox','0 0 760 80');svg.setAttribute('role','img');svg.setAttribute('aria-label',`${labels[metric]}: ${number(value)} no dia`);
+        const line=document.createElementNS(ns,'line');for(const [key,val] of Object.entries({x1:24,x2:736,y1:49,y2:49,stroke:'#85818e','stroke-width':1}))line.setAttribute(key,val);svg.append(line);
+        const point=document.createElementNS(ns,'circle');for(const [key,val] of Object.entries({cx:380,cy:49,r:6,fill:'#ad86df'}))point.setAttribute(key,val);svg.append(point);
+        const label=document.createElementNS(ns,'text');for(const [key,val] of Object.entries({x:380,y:29,'text-anchor':'middle',fill:'#ad86df','font-size':16}))label.setAttribute(key,val);label.textContent=number(value);svg.append(label);
+        section.append(svg);
+      }
+      section.append(compact,element('p','official-chart-note','Total oficial da conta por dia (UTC). A Meta não forneceu pontos horários para este total.'));root.append(section);return;
     }
     const points=[];for(let at=current.from;at<current.to;at+=DAY){const data=aggregate(rows,ids,{from:at,to:Math.min(at+DAY,current.to)},metric);points.push({at,value:data.value??data.partialValue,count:data.count});}
     const before=[];for(let at=prior.from;at<prior.to;at+=DAY){const data=aggregate(rows,ids,{from:at,to:Math.min(at+DAY,prior.to)},metric);before.push({at,value:data.value??data.partialValue,count:data.count});}
@@ -119,14 +179,64 @@
     points.forEach((point,index)=>{if(index%Math.max(1,Math.ceil(points.length/6))===0||index===points.length-1)node('text',{x:x(index),y:187,'text-anchor':'middle',class:'insights-axis'}).textContent=shortDay(point.at);});
     section.append(svg,summary);
     if(points.some(point=>point.value!=null&&point.count<ids.length))section.append(element('p','official-chart-note','Alguns pontos somam apenas as contas com dados no dia; confira a cobertura ao selecionar cada ponto.'));
+    section.append(element('p','official-chart-note','Totais oficiais da conta por dia (UTC); incluem os formatos autorizados pela Meta.'));
     root.append(section);
+  }
+  function activity(root,ids,current){
+    const section=element('section','dashboard-panel official-activity');
+    const head=element('div','official-section-head');
+    head.append(element('h2','','Atividade dos Reels por hora'));
+    const days=[];const end=new Date(current.to-1);end.setHours(0,0,0,0);
+    for(let at=+end;at+DAY>current.from&&days.length<90;){days.push(at);const previous=new Date(at);previous.setDate(previous.getDate()-1);at=+previous;}
+    const items=(state.postings?.items||[]).filter(item=>ids.includes(item.account_id));
+    const history=state.postings?.insightHistory||[];
+    const itemIds=new Set(items.map(item=>item.id));
+    const nextDay=at=>{const date=new Date(at);date.setDate(date.getDate()+1);return +date;};
+    const key=at=>new Date(at).toLocaleDateString('sv-SE');
+    if(!days.some(at=>key(at)===activityDay)){
+      const active=days.find(at=>items.some(item=>item.status==='published'&&Date.parse(item.published_at)>=at&&Date.parse(item.published_at)<nextDay(at))||history.some(point=>itemIds.has(point.item_id)&&Date.parse(point.fetched_at)>=at&&Date.parse(point.fetched_at)<nextDay(at)));
+      activityDay=key(active??days[0]??current.from);
+    }
+    const select=element('select');select.setAttribute('aria-label','Dia da atividade por hora');
+    for(const at of days)select.append(new Option(new Date(at).toLocaleDateString('pt-BR',{day:'2-digit',month:'2-digit',year:'numeric'}),key(at)));
+    select.value=activityDay;select.onchange=()=>{activityDay=select.value;renderKey='';renderDashboard();};head.append(select);section.append(head);
+    const day=days.find(at=>key(at)===activityDay)??days[0];
+    if(day==null){section.append(element('p','dashboard-empty','Nenhum dia neste período.'));root.append(section);return;}
+    const next=new Date(day);next.setDate(next.getDate()+1);
+    const hours=window.dashboardAnalytics.instagramHourlyActivity(items,history,ids,Math.max(day,current.from),Math.min(+next,current.to));
+    const totalPosts=hours.reduce((sum,hour)=>sum+hour.published,0),measured=hours.filter(hour=>hour.views!=null).length,totalViews=hours.reduce((sum,hour)=>sum+(hour.views??0),0);
+    const summary=element('p','official-chart-note',`${totalPosts} Reel${totalPosts===1?'':'s'} publicado${totalPosts===1?'':'s'} · ${measured} hora${measured===1?'':'s'} com ganho medido · ${number(totalViews)} views observadas`);section.append(summary);
+    if(!totalPosts&&!measured){section.append(element('p','dashboard-empty','Sem publicações ou duas leituras de um mesmo Reel neste dia.'));root.append(section);return;}
+    const svg=document.createElementNS('http://www.w3.org/2000/svg','svg');svg.setAttribute('viewBox','0 0 900 235');svg.setAttribute('role','img');svg.setAttribute('aria-label','Reels publicados e ganhos de views observados por hora');
+    const node=(tag,attrs)=>{const value=document.createElementNS('http://www.w3.org/2000/svg',tag);for(const [name,entry] of Object.entries(attrs))value.setAttribute(name,entry);svg.append(value);return value;};
+    const maxPosts=Math.max(1,...hours.map(hour=>hour.published)),maxViews=Math.max(1,...hours.map(hour=>hour.views||0));
+    let segment=[];const flush=()=>{if(segment.length>1)node('polyline',{points:segment.join(' '),fill:'none',stroke:'#5cc6bc','stroke-width':2.5});segment=[];};
+    hours.forEach((hour,index)=>{if(hour.views==null){flush();return;}segment.push(`${39+index*35},${173-hour.views/maxViews*112}`);});flush();
+    for(let index=0;index<24;index++){
+      const hour=hours[index],x=39+index*35;
+      if(hour.published)node('rect',{x:x-8,y:173-hour.published/maxPosts*112,width:16,height:hour.published/maxPosts*112,rx:3,fill:'#ad86df'});
+      if(hour.views!=null)node('circle',{cx:x,cy:173-hour.views/maxViews*112,r:4,fill:'#5cc6bc'});
+      if(index%3===0)node('text',{x,y:203,'text-anchor':'middle',class:'insights-axis'}).textContent=`${String(index).padStart(2,'0')}h`;
+      const hit=node('rect',{x:x-15,y:30,width:30,height:153,fill:'transparent',tabindex:0,'aria-label':`${String(index).padStart(2,'0')}h: ${hour.published} Reels publicados; ${hour.views==null?'sem ganho medido':`${number(hour.views)} views observadas em ${hour.intervals} intervalo(s)`}`});
+      hit.addEventListener('focus',()=>{detail.textContent=hit.getAttribute('aria-label');});hit.addEventListener('pointerenter',()=>{detail.textContent=hit.getAttribute('aria-label');});
+    }
+    const legend=element('div','official-legend');legend.append(element('span','official-legend-current','Reels publicados'),element('span','official-legend-views','Ganhos de views observados'));section.append(legend,svg);
+    const detail=element('p','official-point-summary','Passe o mouse ou use Tab para ver cada hora.');detail.setAttribute('aria-live','polite');section.append(detail);
+    section.append(element('p','official-chart-note','Publicações usam o horário real local. Os ganhos são atribuídos à hora da leitura final e não indicam quando cada view ocorreu. Ausência de leituras aparece sem ponto.'));
+    root.append(section);
+  }
+  function rankIdentity(account){
+    const identity=element('div','official-rank-identity');
+    identity.append(element('strong','',profileLabel(account)));
+    const tags=accountTagGroup(account);if(tags)identity.append(tags);
+    return identity;
   }
   function ranking(root,rows,ids,current){
     const section=element('section','dashboard-panel official-ranking'),head=element('div','official-section-head');
     head.append(element('h2','','Contas com melhor desempenho'),element('small','',`Ordenadas por ${labels[metric].toLowerCase()}`));section.append(head);
     if(ids.length===1){
       const account=state.accounts.find(row=>row.id===ids[0]);
-      if(account){const identity=element('div','official-rank-row');identity.append(portrait(account),element('strong','',profileLabel(account)),element('span','','Conta selecionada'));section.append(identity);}
+      if(account){const identity=element('div','official-rank-row');identity.append(portrait(account),rankIdentity(account),element('span','','Conta selecionada'));section.append(identity);}
       const monitored=(state.postings?.items||[]).filter(item=>item.account_id===ids[0]&&item.status==='published'&&item.media_id).length;
       section.append(element('p','official-subtle',`${monitored} Reels publicados pelo Comment Studio disponíveis para monitoramento.`));root.append(section);return;
     }
@@ -134,7 +244,7 @@
     const max=Math.max(1,...ranked.map(row=>row.value||0));
     if(!ranked.length)section.append(element('div','dashboard-empty','Nenhuma conta selecionada.'));
     for(const row of ranked){
-      const line=element('div','official-rank-row');line.append(portrait(row.account),element('strong','',profileLabel(row.account)));
+      const line=element('div','official-rank-row');line.append(portrait(row.account),rankIdentity(row.account));
       const stats=element('span','official-rank-stats',`${number(row.views)} visualizações · ${number(row.reach)} alcance`);line.append(stats);
       const value=element('b','',number(row.value));value.title=labels[metric];line.append(value);
       const bar=element('div','official-rank-meter'),fill=element('span');fill.style.width=`${row.value==null?0:Math.max(2,row.value/max*100)}%`;bar.append(fill);line.append(bar);section.append(line);
@@ -186,7 +296,7 @@
           if(video.values[key]!=null)stats.append(element('span','',`${label} ${number(video.values[key])}`));
         if(video.values.ig_reels_avg_watch_time!=null)stats.append(element('span','',`Tempo médio ${(video.values.ig_reels_avg_watch_time/1000).toLocaleString('pt-BR',{maximumFractionDigits:1})} s`));
         info.append(stats);card.append(thumb,info);body.append(card);
-        window.studio.videoThumbnail?.(video.item_id).then(src=>{if(!src||!thumb.isConnected)return;const image=element('img');image.src=src;image.alt='';thumb.replaceChildren(image);}).catch(()=>{});
+        cachedImage(reelThumbnails,`${video.item_id}:${item?.file||''}`,thumb,()=>window.studio.videoThumbnail?.(video.item_id));
       }
       allButton.hidden=!sorted.length;
       allButton.textContent=reelAll?(reelVisible<sorted.length?'Mostrar mais':'Mostrar menos'):'Ver todos';
@@ -209,45 +319,56 @@
     section.append(strip);root.append(section);
   }
   renderDashboard=()=>{
-    original();
-    const instagram=document.querySelector('#dashboard-platform').value==='instagram';
-    dashboard.classList.toggle('official-instagram',instagram);dashboard.classList.toggle('official-show-reels',instagram&&legacyOpen);panel.hidden=!instagram;
+    const instagram=activePlatform==='instagram';
+    const wasHidden=panel.hidden;
+    dashboard.classList.toggle('official-instagram',instagram);panel.hidden=!instagram;
     for(const id of ['dashboard-start-time','dashboard-end-time','dashboard-group']){const field=document.getElementById(id);field.disabled=instagram;field.closest('label').hidden=instagram;}
-    for(const selector of ['#dashboard-metrics','.dashboard-network-analysis','.analytics-panel','.dashboard-analysis-bottom','.insights-queue-panel'])
+    for(const selector of ['#dashboard-metrics','.dashboard-network-analysis','.analytics-panel','.dashboard-analysis-bottom','.insights-queue-panel','.dashboard-campaign-panel','.dashboard-hourly-panel','#dashboard-tiktok-panel'])
       for(const node of dashboard.querySelectorAll(selector))node.hidden=instagram;
-    const sequence=++ticket;if(!instagram)return;
+    const sequence=++ticket;if(!instagram){original();return;}
+    renderDashboardFilters('instagram');
     dashboard.querySelector('h1').textContent='Dashboard Instagram';
-    const refreshStatus=document.querySelector('#dashboard-refresh-status'),refreshDetail=refreshStatus.textContent;
-    refreshStatus.title=refreshDetail;
-    refreshStatus.textContent=dashboardRefreshing?'Atualizando métricas…':dashboardBackgroundRefreshing?'Atualizando Reels…':refreshDetail;
+    document.querySelector('#dashboard-tiktok-settings').hidden=true;
+    document.querySelector('#dashboard-refresh-insights').hidden=false;
+    document.querySelector('#dashboard-auto-refresh').hidden=false;
+    const refreshStatus=document.querySelector('#dashboard-refresh-status');refreshStatus.hidden=false;
+    refreshStatus.textContent=dashboardRefreshing?'Atualizando métricas…':dashboardBackgroundRefreshing?'Atualizando Reels…':'Carregando métricas salvas…';
+    refreshStatus.title=refreshStatus.textContent;
     const [current,prior]=ranges();
-    if(!Number.isFinite(current.from)||!Number.isFinite(current.to)||current.from>=current.to){panel.replaceChildren(element('p','dashboard-empty','Selecione um período válido.'));return;}
+    if(!Number.isFinite(current.from)||!Number.isFinite(current.to)||current.from>=current.to){renderKey='';panel.replaceChildren(element('p','dashboard-empty','Selecione um período válido.'));return;}
+    const localRange=activityRange();
     const ids=state.accounts.filter(account=>account.platform==='instagram'&&dashboardAccountMatches(account.id,'instagram')).map(account=>account.id);
+    document.querySelector('#dashboard-refresh-insights').disabled=dashboardRefreshing||!state.accounts.some(account=>ids.includes(account.id)&&account.meta?.connected&&account.meta?.insightsGranted);
     const key=`${ids.join(',')}:${current.from}:${current.to}`;
-    if(key!==displayKey){panel.replaceChildren(element('p','official-loading','Carregando dados salvos…'));displayKey=key;reelAll=null;reelVisible=5;}
-    window.studio.instagramOfficialMetrics({accountIds:ids,from:prior.from,to:current.to}).then(result=>{
+    if(key!==displayKey||wasHidden){panel.replaceChildren(element('p','official-loading','Carregando dados salvos…'));displayKey=key;renderKey='';reelAll=null;reelVisible=5;}
+    window.studio.instagramOfficialMetrics({accountIds:ids,from:document.querySelector('#dashboard-period').value==='today'?prior.from-DAY:prior.from,to:current.to}).then(result=>{
       if(sequence!==ticket)return;
-      const display=window.dashboardAnalytics.officialDisplayRange(result.metrics,ids,current,prior,document.querySelector('#dashboard-period').value);
+      const display=window.dashboardAnalytics.officialDisplayRange(result.metrics,ids,current,prior,document.querySelector('#dashboard-period').value,localDay());
       const shown=display.current;
+      const lastOfficial=aggregate(result.metrics,ids,shown,'views').latest.sort((a,b)=>b-a)[0];
+      refreshStatus.textContent=dashboardRefreshing?'Atualizando métricas…':dashboardBackgroundRefreshing?'Atualizando Reels…':dashboardRefreshMessage|| (lastOfficial?`Última coleta da conta: ${dateTime(lastOfficial)}`:'Sem coleta da conta neste período');
+      refreshStatus.title=refreshStatus.textContent;
       const customComparison=document.querySelector('#dashboard-compare-from')?.value&&document.querySelector('#dashboard-compare-to')?.value;
       const shownPrior=customComparison?prior:display.prior;
+      const accounts=state.accounts.filter(account=>ids.includes(account.id)).map(account=>[account.id,account.handle,account.name,accountTags(account),account.meta?.connected,account.meta?.needsReconnect,account.error]);
+      const postings=(state.postings?.items||[]).filter(item=>ids.includes(item.account_id)).map(item=>[item.id,item.account_id,item.status,item.published_at,item.file,item.caption]);
+      const nextRenderKey=JSON.stringify([key,shown,shownPrior,localRange,metric,compare,display.cached,result.metrics,result.media,result.followers,result.authorizedIds,accounts,postings,state.postings?.insightHistory]);
+      if(nextRenderKey===renderKey)return;
+      renderKey=nextRenderKey;
       photoObserver.disconnect();panel.replaceChildren();
-      status(panel,result.metrics,ids,result,shown,display.cached);
-      cards(panel,result.metrics,ids,shown,shownPrior,result.followers||[]);
-      graph(panel,result.metrics,ids,shown,shownPrior);
+      status(panel,result.metrics,ids,result,shown,display.cached,current);
+      cards(panel,result.metrics,ids,shown,shownPrior,result.followers||[],localRange);
+      graph(panel,result.metrics,ids,shown,shownPrior,display.cached);
+      activity(panel,ids,localRange);
       ranking(panel,result.metrics,ids,shown);
       reels(panel,result,ids,shown,shownPrior,sequence);
-      queue(panel,ids,shown);
+      queue(panel,ids,localRange);
       const technical=element('details','official-details');technical.append(element('summary','','Sobre os dados'));
       const views=aggregate(result.metrics,ids,shown,'views');
       technical.append(element('p','','Os totais da conta incluem todos os formatos autorizados. As métricas dos Reels são individuais. O alcance de contas diferentes pode incluir as mesmas pessoas.'));
       technical.append(element('p','',`Cobertura de visualizações: ${views.count} de ${ids.length} contas. Períodos informados pela Meta em UTC; não há série horária para totais diários.`));
       panel.append(technical);
-      const legacy=element('button','text-button official-legacy-toggle',legacyOpen?'Ocultar análises dos Reels monitorados':'Ver análises dos Reels monitorados');
-      legacy.type='button';legacy.setAttribute('aria-expanded',String(legacyOpen));
-      legacy.onclick=()=>{legacyOpen=!legacyOpen;dashboard.classList.toggle('official-show-reels',legacyOpen);legacy.setAttribute('aria-expanded',String(legacyOpen));legacy.textContent=legacyOpen?'Ocultar análises dos Reels monitorados':'Ver análises dos Reels monitorados';};
-      panel.append(legacy);
-    }).catch(error=>{if(sequence===ticket)panel.replaceChildren(element('p','dashboard-empty',error.message));});
+    }).catch(error=>{if(sequence===ticket){renderKey='';panel.replaceChildren(element('p','dashboard-empty',error.message));}});
   };
   const firstRender=setInterval(()=>{
     if(!document.body.dataset.ready)return;
@@ -255,4 +376,14 @@
     renderDashboard();
   },25);
   setTimeout(()=>clearInterval(firstRender),30000);
+  document.querySelector('[data-page="dashboard"]').addEventListener('click',()=>{if(!dashboard.hidden)renderDashboard();});
+  setInterval(()=>{
+    if(!document.body.dataset.ready)return;
+    const now=Date.now();
+    if(localDay()===rangeLocalDay&&Math.floor(now/DAY)===Math.floor(rangeNow/DAY))return;
+    if(dashboard.hidden||document.querySelector('#dashboard-platform').value!=='instagram')return;
+    renderDashboard();
+    const auto=document.querySelector('#dashboard-auto-refresh');
+    if(auto?.getAttribute('aria-pressed')==='true')document.querySelector('#dashboard-refresh-insights').click();
+  },60000);
 })();

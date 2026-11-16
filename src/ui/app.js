@@ -44,6 +44,8 @@ function renderTargetTags() {
 let state = { accounts: [], proxies: [], campaign: null, events: [] };
 let campaignDirty = false;
 let currentPage = 'dashboard';
+let activePlatform = ['instagram', 'tiktok', 'x'].includes(localStorage.getItem('comment-studio-active-platform')) ? localStorage.getItem('comment-studio-active-platform') : 'instagram';
+$('#dashboard-platform').value = activePlatform;
 let historyFilter = 'all';
 let historyPage = 1;
 let historyPageSize = 10;
@@ -56,6 +58,8 @@ let dashboardRefreshMessage = '';
 const pageNames = { dashboard: 'Dashboard', campaign: 'Campanha TikTok', x: 'Campanha Twitter (X)', accounts: 'Contas', proxies: 'Proxies', media: 'Preparar mídia', postings: 'Postagens Instagram', history: 'Histórico' };
 const accountForm = $('#account-form');
 const proxyForm = $('#proxy-form');
+// O mesmo diálogo de proxy atende a página Proxies e o cadastro de conta.
+document.body.append($('#proxy-dialog'));
 const bulkRows = $('#bulk-account-rows');
 const bulkProxyForm = $('#bulk-proxy-form');
 const bulkDialog = $('#bulk-accounts-dialog');
@@ -90,35 +94,65 @@ function notify(message, error = false) {
 }
 $('#notice button').addEventListener('click', () => { $('#notice').hidden = true; });
 function updateGroupLabels() {
-  $$('.nav-group').forEach(group => group.querySelector('summary').setAttribute('aria-label', `${group.open ? 'Fechar' : 'Abrir'} ${group.querySelector('.nav-group-label').textContent}`));
+  $$('.nav-group').forEach(group => {
+    const selected = group.dataset.platform === activePlatform;
+    group.classList.toggle('selected-platform', selected);
+    const button = group.querySelector('button');
+    button.setAttribute('aria-label', `Selecionar ${group.querySelector('.nav-group-label').textContent}`);
+    button.setAttribute('aria-pressed', String(selected));
+  });
+  $('[data-page="campaign"]').hidden = activePlatform !== 'tiktok';
+  $('[data-page="x"]').hidden = activePlatform !== 'x';
+  $('#campaigns-unavailable-nav').hidden = activePlatform !== 'instagram';
+}
+function setActivePlatform(platform) {
+  if (!['instagram', 'tiktok', 'x'].includes(platform) || activePlatform === platform) return;
+  activePlatform = platform;
+  localStorage.setItem('comment-studio-active-platform', platform);
+  $('#dashboard-platform').value = platform; // Compatibility with the existing TikTok and X views.
+  $('#dashboard-tag').value = 'all';
+  $('#dashboard-account').value = 'all';
+  dashboardComparedAccounts.clear();
+  $('#account-search').value = '';
+  $('#account-tag-filter').value = 'all';
+  $('#account-proxy-filter').value = 'all';
+  $('#account-platform-filter').value = platform;
+  $('#bulk-platform').value = platform;
+  $('#proxy-search').value = '';
+  historyPage = 1;
+  updateGroupLabels();
+  render();
+  renderMedia();
 }
 function page(name) {
   if (!pageNames[name]) return;
+  if (name === 'campaign' && activePlatform !== 'tiktok') setActivePlatform('tiktok');
+  if (name === 'x' && activePlatform !== 'x') setActivePlatform('x');
   currentPage = name;
-  const selectedNav = document.querySelector(`[data-page="${name}"]`);
-  if (selectedNav?.closest('.nav-group')) {
-    const activeGroup = selectedNav.closest('.nav-group');
-    $$('.nav-group').forEach(group => { group.open = group === activeGroup; });
-  } else if (selectedNav?.closest('.nav-general')) $$('.nav-group').forEach(group => { group.open = false; });
   updateGroupLabels();
+  const unavailable = name === 'postings' && activePlatform !== 'instagram';
+  const postingPanel = $('[data-panel="postings"]');
+  postingPanel.classList.toggle('unavailable', unavailable);
+  let postingMessage = $('#postings-unavailable');
+  if (unavailable && !postingMessage) {
+    postingMessage = element('div', 'empty-state'); postingMessage.id = 'postings-unavailable';
+    postingPanel.prepend(postingMessage);
+  }
+  if (postingMessage) {
+    postingMessage.hidden = !unavailable;
+    if (unavailable) postingMessage.replaceChildren(element('h1', '', `Postagens ${platformName(activePlatform)}`), element('p', '', `Postagens no ${platformName(activePlatform)} ainda não estão disponíveis.`));
+  }
   $$('[data-panel]').forEach(panel => { panel.hidden = panel.dataset.panel !== name; });
   $$('[data-page]').forEach(button => { const active = button.dataset.page === name; button.classList.toggle('active', active); if (active) button.setAttribute('aria-current', 'page'); else button.removeAttribute('aria-current'); });
-  $('#breadcrumb').textContent = pageNames[name];
+  $('#breadcrumb').textContent = name === 'dashboard' ? `Dashboard ${platformName(activePlatform)}` : name === 'postings' ? `Postagens ${platformName(activePlatform)}` : pageNames[name];
   $('#notice').hidden = true;
   window.scrollTo({ top: 0 });
 }
 $$('[data-page]').forEach(button => button.addEventListener('click', () => page(button.dataset.page)));
-$$('.nav-group').forEach(group => group.querySelector('summary').addEventListener('click', event => {
-  event.preventDefault();
-  if (document.body.classList.contains('sidebar-collapsed')) {
-    setSidebarCollapsed(false);
-    $$('.nav-group').forEach(other => { other.open = other === group; });
-    updateGroupLabels();
-    return;
-  }
-  const open = !group.open;
-  $$('.nav-group').forEach(other => { other.open = other === group && open; });
-  updateGroupLabels();
+$$('.nav-group').forEach(group => group.querySelector('button').addEventListener('click', () => {
+  if (document.body.classList.contains('sidebar-collapsed')) setSidebarCollapsed(false);
+  setActivePlatform(group.dataset.platform);
+  page('dashboard');
 }));
 updateGroupLabels();
 $$('[data-go]').forEach(button => button.addEventListener('click', () => page(button.dataset.go)));
@@ -127,7 +161,44 @@ function empty(title, detail, symbol) { const node = element('div', 'empty-state
 function formatDate(value) { return new Date(value).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }); }
 function fileName(value) { return String(value || '').split(/[\\/]/).pop(); }
 function platformName(value) { return value === 'instagram' ? 'Instagram' : value === 'x' ? 'Twitter (X)' : 'TikTok'; }
-function profileLabel(account) { return account.handle ? `@${account.handle}` : account.name; }
+function profileLabel(account) { return account.name && account.name !== account.handle ? account.name : account.handle ? `@${account.handle}` : account.name || 'Conta'; }
+function proxyTitle(proxy) {
+  const linked = state.accounts.filter(account => account.proxyId === proxy.id && (account.platform || 'tiktok') === activePlatform);
+  return linked.length === 1 && linked[0].platform === 'instagram' && linked[0].handle ? `Proxy @${linked[0].handle}` : proxy.name;
+}
+function platformProxies() {
+  return state.proxies.filter(proxy => {
+    const linked = state.accounts.filter(account => account.proxyId === proxy.id);
+    return !linked.length || linked.some(account => (account.platform || 'tiktok') === activePlatform);
+  });
+}
+function accountTags(account) { return Array.isArray(account.tags) ? account.tags.filter(tag => typeof tag === 'string' && tag.trim()) : []; }
+function tagKey(tag) { return tag.toLocaleLowerCase('pt-BR'); }
+const defaultAccountTagColor = '#8758b5';
+function accountTagDefinitions() {
+  const tags = new Map();
+  for (const tag of state.accountTags || []) if (typeof tag.name === 'string' && /^#[0-9a-f]{6}$/i.test(tag.color)) tags.set(tagKey(tag.name), tag);
+  for (const account of state.accounts) for (const name of accountTags(account)) if (!tags.has(tagKey(name))) tags.set(tagKey(name), { name, color: defaultAccountTagColor });
+  return [...tags.values()].sort((a, b) => a.name.localeCompare(b.name, 'pt-BR'));
+}
+function availableAccountTags(accounts) {
+  const tags = new Map();
+  const names = new Map(accountTagDefinitions().map(tag => [tagKey(tag.name), tag.name]));
+  for (const account of accounts) for (const tag of accountTags(account)) if (!tags.has(tagKey(tag))) tags.set(tagKey(tag), names.get(tagKey(tag)) || tag);
+  return [...tags].sort((a, b) => a[1].localeCompare(b[1], 'pt-BR'));
+}
+function accountTagBadge(name) {
+  const badge = element('span', 'account-tag', `#${name}`);
+  badge.style.setProperty('--tag-color', accountTagDefinitions().find(tag => tagKey(tag.name) === tagKey(name))?.color || defaultAccountTagColor);
+  return badge;
+}
+function accountTagGroup(account) {
+  const tags = accountTags(account);
+  if (!tags.length) return null;
+  const group = element('span', 'account-tag-list');
+  for (const tag of tags) group.append(accountTagBadge(tag));
+  return group;
+}
 function platformIcon(value) {
   const platform = ['instagram', 'x'].includes(value) ? value : 'tiktok';
   const icon = element('span', `platform-icon platform-${platform}`);
@@ -175,7 +246,7 @@ function actionButton(label, fn, kind = 'secondary') { const button = element('b
 function refreshBulkProxyOptions() {
   for (const select of bulkRows.querySelectorAll('.bulk-proxy-select')) {
     const selected = select.value;
-    select.replaceChildren(new Option('Conexão direta', ''), ...state.proxies.map(proxy => new Option(proxy.name, proxy.id)));
+    select.replaceChildren(new Option('Conexão direta', ''), ...platformProxies().map(proxy => new Option(proxy.name, proxy.id)));
     select.value = selected;
   }
 }
@@ -293,37 +364,157 @@ function attribution(location) {
   source.append(link);
   return source;
 }
+let accountTimes = [];
+let accountScheduleTouched = false;
+let accountHadFixedSchedule = false;
+const selectedAccountTags = new Set();
+const accountTagForm = $('#account-tag-form');
+function renderAccountTagOptions() {
+  const options = $('#account-tag-options'); options.replaceChildren();
+  for (const tag of accountTagDefinitions()) {
+    const choice = element('span', 'account-tag-choice');
+    const select = element('button', 'account-tag-select'); select.type = 'button';
+    select.setAttribute('aria-pressed', String(selectedAccountTags.has(tagKey(tag.name))));
+    select.setAttribute('aria-label', `${selectedAccountTags.has(tagKey(tag.name)) ? 'Remover' : 'Selecionar'} tag ${tag.name}`);
+    select.append(accountTagBadge(tag.name));
+    select.addEventListener('click', () => {
+      const key = tagKey(tag.name);
+      if (selectedAccountTags.has(key)) selectedAccountTags.delete(key);
+      else if (selectedAccountTags.size < 12) selectedAccountTags.add(key);
+      else { $('#account-tags-error').textContent = 'Selecione no máximo 12 tags por conta.'; $('#account-tags-error').hidden = false; return; }
+      $('#account-tags-error').hidden = true; renderAccountTagOptions();
+    });
+    const edit = element('button', 'account-tag-edit', '✎'); edit.type = 'button';
+    edit.setAttribute('aria-label', `Editar nome e cor da tag ${tag.name}`);
+    edit.addEventListener('click', () => openAccountTagDialog(tag));
+    choice.append(select, edit); options.append(choice);
+  }
+  if (!options.childElementCount) options.append(element('span', 'help', 'Nenhuma tag criada.'));
+  $('#account-tags-input').value = accountTagDefinitions().filter(tag => selectedAccountTags.has(tagKey(tag.name))).map(tag => tag.name).join(', ');
+}
+function openAccountTagDialog(tag = null) {
+  accountTagForm.reset();
+  accountTagForm.elements.originalName.value = tag?.name || '';
+  accountTagForm.elements.name.value = tag?.name || '';
+  accountTagForm.elements.color.value = tag?.color || defaultAccountTagColor;
+  $('#account-tag-dialog-title').textContent = tag ? 'Editar tag' : 'Criar tag';
+  $('#account-tag-save').textContent = tag ? 'Salvar tag' : 'Criar e selecionar';
+  $('#account-tag-edit-note').hidden = !tag;
+  $('#account-tag-error').hidden = true;
+  $('#account-tag-dialog').showModal();
+  accountTagForm.elements.name.focus();
+}
+$('#account-tag-create').addEventListener('click', () => openAccountTagDialog());
+for (const id of ['account-tag-dialog-close', 'account-tag-cancel']) $(`#${id}`).addEventListener('click', () => $('#account-tag-dialog').close());
+accountTagForm.addEventListener('submit', async event => {
+  event.preventDefault();
+  const input = Object.fromEntries(new FormData(accountTagForm));
+  const button = event.submitter || $('#account-tag-save'); button.disabled = true;
+  $('#account-tag-error').hidden = true;
+  try {
+    const next = await window.studio.saveAccountTag(input);
+    const oldKey = tagKey(input.originalName);
+    const saved = next.accountTags.find(tag => tagKey(tag.name) === tagKey(input.name.trim().replace(/^#/, '')));
+    const savedKey = tagKey(saved?.name || input.name.trim().replace(/^#/, ''));
+    if (input.originalName && selectedAccountTags.delete(oldKey)) selectedAccountTags.add(savedKey);
+    else if (!input.originalName) selectedAccountTags.add(savedKey);
+    state = next; render();
+    $('#account-tag-dialog').close();
+    $('#account-tag-create').focus();
+  } catch (error) { $('#account-tag-error').textContent = error.message; $('#account-tag-error').hidden = false; }
+  finally { button.disabled = false; }
+});
+function accountScheduleError(message = '') {
+  $('#account-schedule-error').textContent = message;
+  $('#account-schedule-error').hidden = !message;
+}
+function renderAccountTimes() {
+  accountTimes.sort();
+  const list = $('#account-time-list'); list.replaceChildren();
+  for (const time of accountTimes) {
+    const chip = element('span', 'posting-time-chip');
+    const remove = element('button', 'posting-time-remove', '×');
+    remove.type = 'button'; remove.setAttribute('aria-label', `Remover horário ${time}`);
+    remove.addEventListener('click', () => {
+      accountTimes = accountTimes.filter(value => value !== time);
+      accountScheduleTouched = true; accountScheduleError(); renderAccountTimes();
+    });
+    chip.append(element('span', '', time), remove); list.append(chip);
+  }
+  $('#account-time-count').textContent = `${accountTimes.length} ${accountTimes.length === 1 ? 'postagem' : 'postagens'} por dia`;
+}
+function syncAccountSchedule() {
+  const instagram = accountForm.elements.platform.value === 'instagram';
+  $('#account-schedule').hidden = !instagram;
+  $('#account-time-variation').disabled = $('#account-time-zone').disabled = !instagram;
+  accountForm.elements.name.required = !instagram || Boolean(accountForm.elements.id.value);
+  $('#account-name-help').hidden = !instagram || Boolean(accountForm.elements.id.value);
+}
+function loadAccountSchedule(accountId) {
+  const schedule = state.postings?.schedules?.find(item => item.account_id === accountId);
+  const config = schedule?.config;
+  accountHadFixedSchedule = config?.mode === 'fixed';
+  accountTimes = accountHadFixedSchedule ? [...config.times] : [];
+  $('#account-time-variation').value = accountHadFixedSchedule ? config.variationMinutes : 0;
+  $('#account-time-zone').value = config?.timeZone || 'America/Sao_Paulo';
+  $('#account-time-zone-summary').textContent = `Fuso horário: ${$('#account-time-zone').value}`;
+  $('#account-schedule-legacy').hidden = !config || accountHadFixedSchedule;
+  accountScheduleTouched = false; accountScheduleError(); renderAccountTimes();
+}
 function resetAccountForm() {
   accountForm.reset(); accountForm.elements.id.value = '';
+  accountForm.elements.platform.value = activePlatform;
+  selectedAccountTags.clear(); $('#account-tags-error').hidden = true; renderAccountTagOptions();
   $('#account-form-title').textContent = 'Adicionar conta';
   $('#account-submit').textContent = 'Adicionar conta';
+  loadAccountSchedule(null); syncAccountSchedule();
   $('#account-connection-type').value = 'direct'; syncAccountConnectionType();
   if ($('#account-dialog').open) $('#account-dialog').close();
 }
 function syncAccountConnectionType() {
   const proxy = $('#account-connection-type').value === 'proxy';
-  $('#account-proxy-field').hidden = $('#account-proxy-help').hidden = !proxy;
+  $('#account-proxy-field').hidden = $('#account-proxy-help').hidden = $('#account-add-proxy').hidden = !proxy;
   $('#proxy-select').required = proxy;
   if (!proxy) $('#proxy-select').value = '';
 }
 $('#account-connection-type').addEventListener('change', syncAccountConnectionType);
-$('#open-account-form').addEventListener('click', () => { resetAccountForm(); $('#account-dialog').showModal(); accountForm.elements.handle.focus(); });
+accountForm.elements.platform.addEventListener('change', syncAccountSchedule);
+$('#account-time-add').addEventListener('click', () => {
+  const time = $('#account-time-input').value;
+  if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(time)) { accountScheduleError('Escolha um horário válido.'); return; }
+  if (accountTimes.includes(time)) { accountScheduleError('Este horário já foi adicionado.'); return; }
+  accountTimes.push(time); accountScheduleTouched = true; accountScheduleError(); renderAccountTimes();
+});
+$('#account-time-input').addEventListener('keydown', event => { if (event.key === 'Enter') { event.preventDefault(); $('#account-time-add').click(); } });
+$('#account-time-variation').addEventListener('input', () => { accountScheduleTouched = true; accountScheduleError(); });
+$('#account-time-zone').addEventListener('input', () => {
+  accountScheduleTouched = true; accountScheduleError();
+  $('#account-time-zone-summary').textContent = `Fuso horário: ${$('#account-time-zone').value}`;
+});
+$('#open-account-form').addEventListener('click', () => { resetAccountForm(); $('#account-dialog').showModal(); accountForm.elements.name.focus(); });
 $('#account-dialog-close').addEventListener('click', resetAccountForm);
-$('#account-dialog').addEventListener('click', event => { if (event.target === $('#account-dialog')) resetAccountForm(); });
 $('#account-dialog').addEventListener('close', () => { if (accountForm.elements.id.value) resetAccountForm(); });
 function editAccount(account) {
   page('accounts');
   accountForm.elements.id.value = account.id;
   accountForm.elements.platform.value = account.platform || 'tiktok';
+  accountForm.elements.name.value = account.name || account.handle || '';
   accountForm.elements.handle.value = account.handle || '';
+  selectedAccountTags.clear();
+  for (const tag of accountTags(account)) selectedAccountTags.add(tagKey(tag));
+  renderAccountTagOptions();
+  loadAccountSchedule(account.id); syncAccountSchedule();
   $('#account-connection-type').value = account.proxyId ? 'proxy' : 'direct'; syncAccountConnectionType();
   accountForm.elements.proxyId.value = account.proxyId || '';
   $('#account-form-title').textContent = `Editar ${profileLabel(account)}`;
   $('#account-submit').textContent = 'Salvar alterações';
   if (!$('#account-dialog').open) $('#account-dialog').showModal();
-  accountForm.elements.handle.focus();
+  accountForm.elements.name.focus();
 }
+let proxyFromAccount = false;
 function resetProxyForm() {
+  const returnToAccount = proxyFromAccount && $('#account-dialog').open;
+  proxyFromAccount = false;
   proxyForm.reset(); proxyForm.elements.id.value = '';
   proxyPaste.setCustomValidity(''); suggestedProxyName = '';
   $('#proxy-paste-status').textContent = '';
@@ -334,6 +525,7 @@ function resetProxyForm() {
   $('#remove-credentials-row').hidden = true;
   $('#proxy-credential-help').textContent = 'Credenciais protegidas pelo Windows. SOCKS5 sem autenticação nesta versão.';
   if ($('#proxy-dialog').open) $('#proxy-dialog').close();
+  if (returnToAccount) $('#account-add-proxy').focus();
 }
 function editProxy(proxy) {
   page('proxies'); resetProxyForm();
@@ -347,10 +539,17 @@ function editProxy(proxy) {
 }
 $('#cancel-account-edit').addEventListener('click', resetAccountForm);
 $('#cancel-proxy-edit').addEventListener('click', resetProxyForm);
+$('#account-add-proxy').addEventListener('click', () => {
+  resetProxyForm();
+  proxyFromAccount = true;
+  $('#proxy-form-title').textContent = 'Adicionar proxy para a conta';
+  $('#proxy-submit').textContent = 'Salvar e selecionar proxy';
+  $('#proxy-dialog').showModal();
+  $('#proxy-paste').focus();
+});
 $('#open-proxy-form').addEventListener('click', () => { resetProxyForm(); $('#proxy-dialog').showModal(); proxyForm.elements.name.focus(); });
 $('#proxy-dialog-close').addEventListener('click', resetProxyForm);
-$('#proxy-dialog').addEventListener('click', event => { if (event.target === $('#proxy-dialog')) resetProxyForm(); });
-$('#proxy-dialog').addEventListener('close', () => { if (proxyForm.elements.id.value) resetProxyForm(); });
+$('#proxy-dialog').addEventListener('close', () => { if (proxyFromAccount || proxyForm.elements.id.value) resetProxyForm(); });
 proxyForm.querySelectorAll('[data-reveal]').forEach(button => button.addEventListener('click', () => {
   const input = button.dataset.reveal === 'proxy-paste' ? proxyPaste : proxyForm.elements.password;
   input.type = input.type === 'password' ? 'text' : 'password';
@@ -374,29 +573,31 @@ proxySearch.addEventListener('input', renderProxies);
 for (const id of ['proxy-protocol-filter', 'proxy-status-filter', 'proxy-usage-filter', 'proxy-sort']) $(`#${id}`).addEventListener('change', renderProxies);
 $$('[data-proxy-view]').forEach(button => button.addEventListener('click', () => { proxyView = button.dataset.proxyView; $$('[data-proxy-view]').forEach(item => item.setAttribute('aria-pressed', String(item === button))); renderProxies(); }));
 $('#test-all-proxies').addEventListener('click', async event => {
-  const button = event.currentTarget, ids = state.proxies.map(proxy => proxy.id);
+  const button = event.currentTarget, ids = platformProxies().map(proxy => proxy.id);
   if (!ids.length || proxyTestingAll) return;
   proxyTestingAll = true; button.disabled = true; let passed = 0;
   try {
     for (let index = 0; index < ids.length; index++) { button.textContent = `Testando ${index + 1}/${ids.length}…`; if (await testProxyOne(ids[index], true)) passed++; }
     notify(`${passed} de ${ids.length} conexões testadas com sucesso${passed < ids.length ? ` · ${ids.length - passed} com falha` : ''}.`);
-  } finally { proxyTestingAll = false; button.textContent = 'Testar conexões'; button.disabled = !state.proxies.length; }
+  } finally { proxyTestingAll = false; button.textContent = 'Testar conexões'; button.disabled = !platformProxies().length; }
 });
 function renderProxies() {
   const query = normalizedSearch(proxySearch.value.trim().replace(/^@/, ''));
   const matches = value => normalizedSearch(value).includes(query);
+  const relevantProxies = platformProxies();
+  const relevantAccounts = state.accounts.filter(account => (account.platform || 'tiktok') === activePlatform);
   const overview = $('#proxy-overview'); overview.replaceChildren();
-  const lastTest = state.proxies.flatMap(proxy => [proxy.diagnostic?.at, proxy.testFailure?.at].filter(Boolean)).sort().at(-1);
+  const lastTest = relevantProxies.flatMap(proxy => [proxy.diagnostic?.at, proxy.testFailure?.at].filter(Boolean)).sort().at(-1);
   for (const [label, value, note] of [
-    ['Total de proxies', state.proxies.length, 'Cadastrados'],
-    ['Funcionando', state.proxies.filter(proxy => proxyStatus(proxy) === 'active').length, 'No último teste'],
-    ['Com falha', state.proxies.filter(proxy => proxyStatus(proxy) === 'problem').length, 'No último teste'],
-    ['Contas vinculadas', state.accounts.filter(account => account.proxyId).length, 'Usando proxy'],
+    ['Total de proxies', relevantProxies.length, 'Disponíveis nesta rede'],
+    ['Funcionando', relevantProxies.filter(proxy => proxyStatus(proxy) === 'active').length, 'No último teste'],
+    ['Com falha', relevantProxies.filter(proxy => proxyStatus(proxy) === 'problem').length, 'No último teste'],
+    ['Contas vinculadas', relevantAccounts.filter(account => account.proxyId).length, 'Usando proxy'],
     ['Último teste', lastTest ? formatDate(lastTest) : '—', lastTest ? 'Data e horário' : 'Ainda não realizado']
   ]) { const card = element('div', 'proxy-stat'); card.append(element('span', '', label), element('strong', '', String(value)), element('small', '', note)); overview.append(card); }
-  $('#test-all-proxies').disabled = !state.proxies.length || proxyTestingAll;
+  $('#test-all-proxies').disabled = !relevantProxies.length || proxyTestingAll;
   const profileResults = $('#proxy-profile-results'); profileResults.replaceChildren();
-  const matchingAccounts = query && proxyView === 'proxy' ? state.accounts.filter(account => matches(account.name) || matches(account.handle)) : [];
+  const matchingAccounts = query && proxyView === 'proxy' ? relevantAccounts.filter(account => matches(account.name) || matches(account.handle)) : [];
   profileResults.hidden = !matchingAccounts.length;
   if (matchingAccounts.length) {
     profileResults.append(element('h2', '', 'Contas encontradas'));
@@ -412,16 +613,16 @@ function renderProxies() {
   const expanded = new Set([...list.querySelectorAll('.proxy-card:has(.proxy-details[open])')].map(card => card.dataset.proxyId));
   list.replaceChildren();
   const protocol = $('#proxy-protocol-filter').value, status = $('#proxy-status-filter').value, usage = $('#proxy-usage-filter').value, sort = $('#proxy-sort').value;
-  const visible = state.proxies.filter(proxy => {
-    const linked = state.accounts.filter(account => account.proxyId === proxy.id);
+  const visible = relevantProxies.filter(proxy => {
+    const linked = relevantAccounts.filter(account => account.proxyId === proxy.id);
     return (!query || [proxy.name, proxy.host, `${proxy.host}:${proxy.port}`, ...linked.flatMap(account => [account.name, account.handle])].some(matches))
       && (protocol === 'all' || proxy.protocol === protocol)
       && (status === 'all' || proxyStatus(proxy) === status)
       && (usage === 'all' || (usage === 'linked' ? linked.length > 0 : linked.length === 0));
   });
-  visible.sort((a, b) => sort === 'recent' ? (Date.parse(b.testFailure?.at || b.diagnostic?.at) || 0) - (Date.parse(a.testFailure?.at || a.diagnostic?.at) || 0) : sort === 'latency' ? (a.diagnostic?.durationMs ?? Infinity) - (b.diagnostic?.durationMs ?? Infinity) : sort === 'usage' ? state.accounts.filter(account => account.proxyId === b.id).length - state.accounts.filter(account => account.proxyId === a.id).length : a.name.localeCompare(b.name, 'pt-BR'));
+  visible.sort((a, b) => sort === 'recent' ? (Date.parse(b.testFailure?.at || b.diagnostic?.at) || 0) - (Date.parse(a.testFailure?.at || a.diagnostic?.at) || 0) : sort === 'latency' ? (a.diagnostic?.durationMs ?? Infinity) - (b.diagnostic?.durationMs ?? Infinity) : sort === 'usage' ? relevantAccounts.filter(account => account.proxyId === b.id).length - relevantAccounts.filter(account => account.proxyId === a.id).length : proxyTitle(a).localeCompare(proxyTitle(b), 'pt-BR'));
   if (proxyView === 'account') {
-    const matching = state.accounts.filter(account => {
+    const matching = relevantAccounts.filter(account => {
       const proxy = state.proxies.find(item => item.id === account.proxyId);
       return (!query || [account.name, account.handle, proxy?.name, proxy?.host].some(matches)) && (protocol === 'all' || proxy?.protocol === protocol) && (status === 'all' || (proxy && proxyStatus(proxy) === status)) && (usage === 'all' || (usage === 'linked' ? Boolean(proxy) : !proxy));
     }).sort((a, b) => profileLabel(a).localeCompare(profileLabel(b), 'pt-BR'));
@@ -432,24 +633,24 @@ function renderProxies() {
       const row = element('article', 'proxy-account-row');
       const identity = element('div', 'proxy-account-identity'); identity.append(platformIcon(account.platform || 'tiktok'));
       const name = element('div'); name.append(element('strong', '', profileLabel(account)), element('small', '', platformName(account.platform || 'tiktok'))); identity.append(name);
-      const connection = element('div', 'proxy-account-connection'); connection.append(element('strong', '', proxy?.name || 'Conexão direta'), element('small', '', proxy ? `${proxy.protocol.toUpperCase()} · ${proxyStatus(proxy) === 'active' ? 'Funcionando no último teste' : proxyStatus(proxy) === 'problem' ? 'Falha no último teste' : 'Não testado'}` : 'Sem proxy'));
+      const connection = element('div', 'proxy-account-connection'); connection.append(element('strong', '', proxy ? proxyTitle(proxy) : 'Conexão direta'), element('small', '', proxy ? `${proxy.protocol.toUpperCase()} · ${proxyStatus(proxy) === 'active' ? 'Funcionando no último teste' : proxyStatus(proxy) === 'problem' ? 'Falha no último teste' : 'Não testado'}` : 'Sem proxy'));
       const edit = element('button', 'secondary', 'Editar conexão'); edit.type = 'button'; edit.addEventListener('click', () => editAccount(account));
       row.append(identity, connection, edit); list.append(row);
     }
     return;
   }
   $('#proxy-search-count').textContent = `${visible.length} proxy${visible.length === 1 ? '' : 's'}`;
-  if (!visible.length) list.append(empty(state.proxies.length ? 'Nenhum proxy encontrado' : 'Nenhum proxy cadastrado', state.proxies.length ? 'Ajuste a busca ou os filtros.' : 'Adicione um proxy para começar.', '⇄'));
+  if (!visible.length) list.append(empty(relevantProxies.length ? 'Nenhum proxy encontrado' : 'Nenhum proxy cadastrado', relevantProxies.length ? 'Ajuste a busca ou os filtros.' : 'Adicione um proxy para começar.', '⇄'));
   for (const proxy of visible) list.append(proxyCard(proxy, expanded.has(proxy.id)));
 }
 function proxyCard(proxy, expanded) {
-  const linked = state.accounts.filter(account => account.proxyId === proxy.id);
+  const linked = state.accounts.filter(account => account.proxyId === proxy.id && (account.platform || 'tiktok') === activePlatform);
   const owner = linked.find(account => account.browserProfile === 'proxy');
   const status = proxyStatus(proxy);
   const labels = { active: 'Funcionando', problem: 'Falha na conexão', untested: 'Não testado', verifying: 'Verificando…' };
   const card = element('article', 'record proxy-card'); card.dataset.proxyId = proxy.id;
   const header = element('div', 'proxy-card-header');
-  const identity = element('div', 'proxy-card-identity'); identity.append(element('h3', '', proxy.name), element('span', '', `${proxy.host}:${proxy.port} · ${proxy.protocol.toUpperCase()}`)); header.append(identity);
+  const identity = element('div', 'proxy-card-identity'); identity.append(element('h3', '', proxyTitle(proxy)), element('span', '', `${proxyTitle(proxy) === proxy.name ? '' : `${proxy.name} · `}${proxy.host}:${proxy.port} · ${proxy.protocol.toUpperCase()}`)); header.append(identity);
   header.append(element('span', `proxy-status proxy-status-${status}`, labels[status])); card.append(header);
   const summary = element('div', 'proxy-card-summary');
   summary.append(element('span', '', `${linked.length} conta${linked.length === 1 ? '' : 's'} vinculada${linked.length === 1 ? '' : 's'}`));
@@ -484,8 +685,8 @@ function proxyCard(proxy, expanded) {
 function render() {
   window.renderX?.(state);
   window.renderPostings?.(state);
-  $('#account-count').textContent = state.accounts.length;
-  $('#workspace-account-count').textContent = state.accounts.length;
+  $('#account-count').textContent = state.accounts.filter(account => (account.platform || 'tiktok') === activePlatform).length;
+  $('#workspace-account-count').textContent = state.accounts.filter(account => (account.platform || 'tiktok') === activePlatform).length;
   const selected = new Set($$('input[name=accountIds]:checked').map(input => input.value));
   const picker = $('#campaign-accounts'); picker.replaceChildren();
   const tiktokAccounts = state.accounts.filter(account => (account.platform || 'tiktok') === 'tiktok');
@@ -496,8 +697,9 @@ function render() {
   }
   const oldProxy = $('#proxy-select').value;
   $('#proxy-select').replaceChildren(new Option('Conexão direta', ''));
-  for (const proxy of state.proxies) $('#proxy-select').append(new Option(proxy.name, proxy.id));
+  for (const proxy of platformProxies()) $('#proxy-select').append(new Option(proxyTitle(proxy), proxy.id));
   $('#proxy-select').value = oldProxy;
+  renderAccountTagOptions();
   refreshBulkProxyOptions();
   renderAccounts();
   renderProxies();
@@ -512,31 +714,55 @@ function accountConnectionStatus(account) {
   if ((account.platform || 'tiktok') !== 'instagram') return 'unknown';
   return account.meta?.connected ? 'connected' : 'disconnected';
 }
+function savedAccountMetric(account, metric) {
+  if (account.platform === 'instagram') return state.accountMetrics?.[metric]?.values?.[account.id]?.value ?? null;
+  if (account.platform !== 'tiktok' || metric !== 'views') return null;
+  const videos = (state.tiktokInsights?.videos || []).filter(video => video.account_id === account.id && Number.isFinite(video.views));
+  return videos.length ? videos.reduce((total, video) => total + video.views, 0) : null;
+}
 function renderAccounts() {
   accountPhotoObserver.disconnect();
+  const platformAccounts = state.accounts.filter(account => (account.platform || 'tiktok') === activePlatform);
+  $('#account-platform-filter').value = activePlatform;
+  $('#account-platform-filter').closest('label').hidden = true;
   const overview = $('#account-overview'); overview.replaceChildren();
-  const statuses = state.accounts.map(accountConnectionStatus);
+  const statuses = platformAccounts.map(accountConnectionStatus);
   const stats = [
-    ['Total de contas', state.accounts.length, 'Cadastradas'],
-    ['Conectadas', statuses.filter(value => value === 'connected').length, 'Meta autorizada'],
-    ['Desconectadas', statuses.filter(value => value === 'disconnected').length, 'Instagram sem autorização'],
-    ['Navegadores abertos', state.accounts.filter(account => account.open || account.browserOpen).length, 'Janelas ativas'],
+    ['Total de contas', platformAccounts.length, 'Cadastradas'],
+    ['Conectadas', statuses.filter(value => value === 'connected').length, 'Nesta rede'],
+    ['Desconectadas', statuses.filter(value => value === 'disconnected').length, 'Nesta rede'],
+    ['Navegadores abertos', platformAccounts.filter(account => account.open || account.browserOpen).length, 'Janelas ativas'],
     ['Com problemas', statuses.filter(value => value === 'problem').length, 'Exigem atenção']
   ];
   for (const [label, value, note] of stats) { const card = element('div', 'account-stat'); card.append(element('span', '', label), element('strong', '', String(value)), element('small', '', note)); overview.append(card); }
   const query = normalizedSearch($('#account-search').value.trim().replace(/^@/, ''));
-  const platformFilter = $('#account-platform-filter').value;
+  const platformFilter = activePlatform;
   const connectionFilter = $('#account-connection-filter').value;
   const proxyFilter = $('#account-proxy-filter');
   const previousProxy = proxyFilter.value;
-  proxyFilter.replaceChildren(new Option('Todas', 'all'), ...state.proxies.map(proxy => new Option(proxy.name, proxy.id)));
-  proxyFilter.value = state.proxies.some(proxy => proxy.id === previousProxy) ? previousProxy : 'all';
+  const relevantProxies = platformProxies();
+  proxyFilter.replaceChildren(new Option('Todas', 'all'), ...relevantProxies.map(proxy => new Option(proxy.name, proxy.id)));
+  proxyFilter.value = relevantProxies.some(proxy => proxy.id === previousProxy) ? previousProxy : 'all';
+  const tagFilter = $('#account-tag-filter');
+  const previousTag = tagFilter.value;
+  const tags = availableAccountTags(platformAccounts);
+  tagFilter.replaceChildren(new Option('Todas', 'all'), ...tags.map(([key, label]) => new Option(`#${label}`, key)));
+  tagFilter.value = tags.some(([key]) => key === previousTag) ? previousTag : 'all';
   const statusFilter = $('#account-status-filter').value;
   const sort = $('#account-sort').value;
-  const visible = state.accounts.filter(account => {
+  const metric = ['views', 'reach'].includes(sort) ? sort : null;
+  const metricNote = $('#account-metric-note');
+  metricNote.hidden = !metric;
+  if (metric) {
+    const window = state.accountMetrics?.[metric]?.window;
+    const period = window ? `${new Date(window.from).toLocaleDateString('pt-BR', { timeZone: 'UTC' })} a ${new Date(window.to - 1).toLocaleDateString('pt-BR', { timeZone: 'UTC' })}` : 'sem período salvo';
+    metricNote.textContent = activePlatform === 'instagram' ? `Dados oficiais salvos de ${period}; sem nova busca. Contas sem esta métrica ficam por último.` : activePlatform === 'tiktok' && metric === 'views' ? 'Soma das visualizações dos vídeos TikTok consultados. Contas sem dados ficam por último.' : 'Métrica indisponível nesta rede.';
+  }
+  const visible = platformAccounts.filter(account => {
     const platform = account.platform || 'tiktok';
-    return (!query || [account.name, account.handle].some(value => normalizedSearch(value).includes(query)))
+    return (!query || [account.name, account.handle, ...accountTags(account)].some(value => normalizedSearch(value).includes(query)))
       && (platformFilter === 'all' || platform === platformFilter)
+      && (tagFilter.value === 'all' || accountTags(account).some(tag => tagKey(tag) === tagFilter.value))
       && (connectionFilter === 'all' || (connectionFilter === 'proxy' ? Boolean(account.proxyId) : !account.proxyId))
       && (proxyFilter.value === 'all' || account.proxyId === proxyFilter.value)
       && (statusFilter === 'all' || accountConnectionStatus(account) === statusFilter);
@@ -544,12 +770,12 @@ function renderAccounts() {
   const list = $('#account-list');
   const expanded = new Set([...list.querySelectorAll('.account-card:has(.account-details[open])')].map(card => card.dataset.accountId));
   list.replaceChildren();
-  if (!visible.length) { list.append(empty(state.accounts.length ? 'Nenhuma conta encontrada' : 'Nenhuma conta cadastrada', state.accounts.length ? 'Ajuste a busca ou os filtros.' : 'Adicione uma conta para começar.', '◎')); return; }
-  const groups = sort === 'platform' ? ['instagram', 'tiktok', 'x'] : ['tiktok', 'instagram', 'x'];
+  if (!visible.length) { list.append(empty(platformAccounts.length ? 'Nenhuma conta encontrada' : 'Nenhuma conta cadastrada', platformAccounts.length ? 'Ajuste a busca ou os filtros.' : 'Adicione uma conta para começar.', '◎')); return; }
+  const groups = sort === 'platform' || metric ? ['instagram', 'tiktok', 'x'] : ['tiktok', 'instagram', 'x'];
   for (const platform of groups) {
     const accounts = visible.filter(account => (account.platform || 'tiktok') === platform);
     if (!accounts.length) continue;
-    accounts.sort((a, b) => sort === 'recent' ? (Date.parse(b.createdAt || b.created_at) || 0) - (Date.parse(a.createdAt || a.created_at) || 0) : sort === 'name-desc' ? profileLabel(b).localeCompare(profileLabel(a), 'pt-BR') : profileLabel(a).localeCompare(profileLabel(b), 'pt-BR'));
+    accounts.sort((a, b) => metric ? (savedAccountMetric(b, metric) ?? -1) - (savedAccountMetric(a, metric) ?? -1) || profileLabel(a).localeCompare(profileLabel(b), 'pt-BR') : sort === 'recent' ? (Date.parse(b.createdAt || b.created_at) || 0) - (Date.parse(a.createdAt || a.created_at) || 0) : sort === 'name-desc' ? profileLabel(b).localeCompare(profileLabel(a), 'pt-BR') : profileLabel(a).localeCompare(profileLabel(b), 'pt-BR'));
     const group = element('details', 'account-group');
     group.open = !collapsedAccountGroups.has(platform);
     group.addEventListener('toggle', () => {
@@ -561,11 +787,11 @@ function renderAccounts() {
     heading.append(element('strong', '', platformName(platform)), element('span', '', `${accounts.length} conta${accounts.length === 1 ? '' : 's'}`));
     group.append(heading);
     const grid = element('div', 'account-grid');
-    for (const account of accounts) grid.append(accountCard(account, expanded.has(account.id)));
+    for (const account of accounts) grid.append(accountCard(account, expanded.has(account.id), metric));
     group.append(grid); list.append(group);
   }
 }
-function accountCard(account, expanded) {
+function accountCard(account, expanded, metric = null) {
   const platformId = account.platform || 'tiktok';
   const platform = platformName(platformId);
   const proxy = state.proxies.find(item => item.id === account.proxyId);
@@ -583,7 +809,7 @@ function accountCard(account, expanded) {
     accountPhotoObserver.observe(avatar);
   }
   identity.append(avatar);
-  const title = element('div'); title.append(element('h3', '', profileLabel(account)), element('span', '', platform)); identity.append(title); top.append(identity);
+  const title = element('div'); title.append(element('h3', '', profileLabel(account)), element('span', '', `${platform}${account.handle && account.name !== account.handle ? ` · @${account.handle}` : ''}`)); identity.append(title); top.append(identity);
   const menu = element('details', 'account-more');
   const trigger = element('summary', '', '⋮'); trigger.setAttribute('aria-label', `Ações de ${profileLabel(account)}`); trigger.title = 'Ações'; menu.append(trigger);
   const menuContent = element('div', 'account-more-menu');
@@ -604,6 +830,15 @@ function accountCard(account, expanded) {
   }
   const edit = element('button', '', 'Editar conta'); edit.type = 'button'; edit.addEventListener('click', () => { menu.open = false; editAccount(account); }); menuContent.append(edit);
   addAction('Excluir conta', async () => { const result = await window.studio.deleteAccount(account.id); if (result.accounts.every(item => item.id !== account.id) && accountForm.elements.id.value === account.id) resetAccountForm(); return result; }, true);
+  if (proxy) {
+    const otherUsers = state.accounts.filter(item => item.id !== account.id && item.proxyId === proxy.id).length;
+    if (!otherUsers) addAction('Excluir conta e proxy', async () => { const result = await window.studio.deleteAccount({ id: account.id, deleteProxy: true }); if (result.accounts.every(item => item.id !== account.id) && accountForm.elements.id.value === account.id) resetAccountForm(); return result; }, true);
+    else {
+      const unavailable = element('button', 'account-menu-danger', 'Excluir conta e proxy'); unavailable.type = 'button'; unavailable.disabled = true;
+      unavailable.title = `Proxy também usada por ${otherUsers} outra(s) conta(s)`;
+      menuContent.append(unavailable);
+    }
+  }
   menu.append(menuContent);
   const topActions = element('div', 'account-card-actions');
   if (queued && schedule?.status !== 'running') {
@@ -619,6 +854,12 @@ function accountCard(account, expanded) {
   summary.append(element('span', 'account-card-status', proxy ? `Proxy · ${proxy.name}` : 'Conexão direta'));
   if (status !== 'unknown') summary.append(element('span', `account-card-status status-${status}`, status === 'connected' ? 'Meta autorizada' : status === 'disconnected' ? 'Meta não autorizada' : 'Precisa de atenção'));
   if (queued) summary.append(element('span', 'account-chip account-queue-chip', `${queued} ${queued === 1 ? 'vídeo' : 'vídeos'} na fila${schedule?.status === 'running' ? ' · ativa' : ''}`));
+  const tagGroup = accountTagGroup(account);
+  if (tagGroup) summary.append(tagGroup);
+  if (metric) {
+    const value = savedAccountMetric(account, metric);
+    summary.append(element('span', 'account-chip', `${metric === 'views' ? 'Visualizações' : 'Alcance'}: ${value === null ? 'sem dados salvos' : value.toLocaleString('pt-BR')}`));
+  }
   card.append(summary);
   const details = element('details', 'account-details'); details.open = expanded;
   const detailsSummary = element('summary', '', 'Ver detalhes'); details.append(detailsSummary);
@@ -635,9 +876,11 @@ function accountCard(account, expanded) {
   details.append(content); card.append(details);
   return card;
 }
-for (const id of ['account-search', 'account-platform-filter', 'account-connection-filter', 'account-status-filter', 'account-proxy-filter', 'account-sort']) $(`#${id}`).addEventListener(id === 'account-search' ? 'input' : 'change', renderAccounts);
+for (const id of ['account-search', 'account-platform-filter', 'account-tag-filter', 'account-connection-filter', 'account-status-filter', 'account-proxy-filter', 'account-sort']) $(`#${id}`).addEventListener(id === 'account-search' ? 'input' : 'change', renderAccounts);
 const dashboardComparedAccounts = new Map();
-function dashboardAccountMatches(id, platform = $('#dashboard-platform').value) {
+function dashboardAccountMatches(id, platform = activePlatform) {
+  const tag = $('#dashboard-tag').value;
+  if (tag !== 'all' && !accountTags(state.accounts.find(account => account.id === id) || {}).some(value => tagKey(value) === tag)) return false;
   const single = $('#dashboard-account').value;
   if (single !== 'all') return id === single;
   const compared = dashboardComparedAccounts.get(platform);
@@ -651,12 +894,17 @@ $('#dashboard-compare-accounts').addEventListener('change', event => {
   $('#dashboard-account').value = 'all';
   renderDashboard();
 });
-function renderDashboard() {
-  const platform = $('#dashboard-platform').value;
+function renderDashboardFilters(platform = activePlatform) {
   const accountFilter = $('#dashboard-account');
   const previousAccount = accountFilter.value;
-  const accounts = state.accounts.filter(account => platform === 'all' || account.platform === platform);
-  accountFilter.replaceChildren(new Option('Todas as contas', 'all'), ...accounts.map(account => new Option(`${platformName(account.platform)} · ${profileLabel(account)}`, account.id)));
+  const platformAccounts = state.accounts.filter(account => platform === 'all' || account.platform === platform);
+  const tagFilter = $('#dashboard-tag');
+  const previousTag = tagFilter.value;
+  const tags = availableAccountTags(platformAccounts);
+  tagFilter.replaceChildren(new Option('Todas as tags', 'all'), ...tags.map(([key, label]) => new Option(`#${label}`, key)));
+  tagFilter.value = tags.some(([key]) => key === previousTag) ? previousTag : 'all';
+  const accounts = platformAccounts.filter(account => tagFilter.value === 'all' || accountTags(account).some(tag => tagKey(tag) === tagFilter.value));
+  accountFilter.replaceChildren(new Option('Todas as contas', 'all'), ...accounts.map(account => new Option(`${platformName(account.platform)} · ${profileLabel(account)}${accountTags(account).length ? ` · ${accountTags(account).map(tag => `#${tag}`).join(' ')}` : ''}`, account.id)));
   accountFilter.value = accounts.some(account => account.id === previousAccount) ? previousAccount : 'all';
   const compared = dashboardComparedAccounts.get(platform);
   if (compared) for (const id of compared) if (!accounts.some(account => account.id === id)) compared.delete(id);
@@ -673,7 +921,12 @@ function renderDashboard() {
   }
   for (const input of comparison.querySelectorAll('input')) input.checked = accountFilter.value === 'all' && Boolean(compared?.has(input.value));
   comparison.parentElement.querySelector('summary').textContent = accountFilter.value === 'all' && compared?.size ? `Comparar contas · ${compared.size}` : 'Comparar contas';
-  const accountIds = new Set(accounts.filter(account => dashboardAccountMatches(account.id, platform)).map(account => account.id));
+  return new Set(accounts.filter(account => dashboardAccountMatches(account.id, platform)).map(account => account.id));
+}
+function renderDashboard() {
+  const platform = activePlatform;
+  const accountIds = renderDashboardFilters(platform);
+  const accounts = state.accounts.filter(account => accountIds.has(account.id));
   const dates = dashboardDates();
   const inPeriod = value => { const ms = Date.parse(value); return Number.isFinite(ms) && ms >= dates.from && ms <= dates.to; };
   const items = (state.postings?.items || []).filter(item => accountIds.has(item.account_id));
@@ -822,6 +1075,9 @@ function renderDashboardHourly(accountIds, dates, platform, instagramHistory, ti
     const time = element('strong', 'dashboard-hour-time', `${hour}h`);
     const detail = element('div', 'dashboard-hour-detail');
     detail.append(element('strong', '', leader?.name || 'Conta indisponível'), element('span', '', `${platformName(bucket.platform)} · +${Number(leader?.views || 0).toLocaleString('pt-BR')} views · Vídeo líder: ${video?.title || '—'}`));
+    const leaderAccount = state.accounts.find(account => account.id === leader?.id);
+    const tags = leaderAccount && accountTagGroup(leaderAccount);
+    if (tags) detail.append(tags);
     detail.append(element('small', '', `Leituras entre ${formatDate(new Date(bucket.earliest).toISOString())} e ${formatDate(new Date(bucket.latest).toISOString())} · ${bucket.intervals} intervalo(s) medido(s)`));
     row.append(time, detail, element('strong', 'dashboard-hour-total', `+${bucket.total.toLocaleString('pt-BR')}`)); root.append(row);
   }
@@ -961,7 +1217,7 @@ function renderDashboardQueue(items) {
   for (const item of visible) {
     const account = state.accounts.find(value => value.id === item.account_id);
     const row = element('div', 'dashboard-queue-row');
-    const details = element('div', 'dashboard-video-details'); details.append(element('strong', '', `${item.queue_kind === 'shared' ? 'Fila única · ' : ''}${fileName(item.file)}`), element('span', '', account ? profileLabel(account) : item.account_name || 'Conta removida'));
+    const details = element('div', 'dashboard-video-details'); details.append(element('strong', '', `${item.queue_kind === 'shared' ? 'Antiga Fila única · ' : ''}${fileName(item.file)}`), element('span', '', account ? profileLabel(account) : item.account_name || 'Conta removida'));
     const status = { queued: 'Na fila', uploading: 'Enviando', processing: 'Processando', publishing: 'Publicando', published: 'Publicado', attention: 'Precisa de atenção', uncertain: 'Conferir resultado', cancelled: 'Cancelado' }[item.status] || item.status;
     const side = element('div', 'dashboard-queue-side'); side.append(element('span', `dashboard-status status-${item.status}`, status));
     const schedule = schedules.get(item.account_id);
@@ -969,9 +1225,10 @@ function renderDashboardQueue(items) {
     row.append(details, side); root.append(row);
   }
 }
-for (const id of ['dashboard-platform', 'dashboard-account', 'dashboard-period', 'dashboard-from', 'dashboard-to', 'dashboard-sort', 'dashboard-start-time', 'dashboard-end-time', 'dashboard-group']) $(`#${id}`).addEventListener('change', () => {
+for (const id of ['dashboard-platform', 'dashboard-tag', 'dashboard-account', 'dashboard-period', 'dashboard-from', 'dashboard-to', 'dashboard-sort', 'dashboard-start-time', 'dashboard-end-time', 'dashboard-group']) $(`#${id}`).addEventListener('change', () => {
   dashboardRefreshMessage = '';
   if (id === 'dashboard-account') dashboardComparedAccounts.delete($('#dashboard-platform').value);
+  if (id === 'dashboard-tag') { $('#dashboard-account').value = 'all'; dashboardComparedAccounts.delete($('#dashboard-platform').value); }
   if (id === 'dashboard-period' && $('#dashboard-period').value === 'custom' && !$('#dashboard-from').value && !$('#dashboard-to').value) {
     const localDate = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
     const from = new Date(); from.setDate(from.getDate() - 6);
@@ -996,7 +1253,8 @@ $('#dashboard-refresh-insights').addEventListener('click', async event => {
       instagramRefreshId = result.refreshId || null;
       instagramAlreadyRunning = Boolean(result.alreadyRunning);
       dashboardBackgroundRefreshing = Boolean(result.backgroundActive) && result.refreshId !== dashboardCompletedRefreshId;
-      messages.push(result.alreadyRunning ? 'Instagram: coleta em segundo plano já em andamento' : `Instagram: totais consultados em ${result.totalsSucceeded}/${result.accounts} conta(s)${result.failures?.length ? ` · ${result.failures.join('; ')}` : ''}`);
+      const period=$('#dashboard-period').selectedOptions[0]?.textContent||'período selecionado';
+      messages.push(result.alreadyRunning ? 'Instagram: coleta em segundo plano já em andamento' : `Instagram (${period}): dados disponíveis em ${result.totalsAvailable??0}/${result.accounts} conta(s)${result.failures?.length ? ` · ${result.failures.join('; ')}` : ''}`);
     }
     if ((platform === 'all' || platform === 'tiktok') && state.accounts.some(item => item.platform === 'tiktok' && dashboardAccountMatches(item.id, platform) && item.tiktokAnalytics?.connected)) {
       const ids = state.accounts.filter(item => item.platform === 'tiktok' && dashboardAccountMatches(item.id, platform)).map(item => item.id);
@@ -1055,12 +1313,12 @@ $('#tiktok-analytics-form').addEventListener('submit', async event => {
   catch (error) { notify(error.message, true); }
 });
 function renderHistory() {
-  const actionEntries = [...(state.attempts || []).map(item => ({ ...item, platform: 'tiktok' })), ...(state.xAttempts || []).map(item => ({ ...item, platform: 'x' }))].map(item => ({ type: 'actions', at: item.at, item }));
-  const eventEntries = (state.events || []).map(item => ({ type: 'events', at: item.at, item }));
+  const actionEntries = [...(state.attempts || []).map(item => ({ ...item, platform: 'tiktok' })), ...(state.xAttempts || []).map(item => ({ ...item, platform: 'x' }))].filter(item => item.platform === activePlatform).map(item => ({ type: 'actions', at: item.at, item }));
+  const eventEntries = (state.events || []).filter(item => item.platform === activePlatform || item.platform === 'shared').map(item => ({ type: 'events', at: item.at, item }));
   const accountIds = new Set(state.accounts.map(account => account.id));
   const postingAttempts = new Map();
   for (const attempt of state.postings?.attempts || []) if (!postingAttempts.has(attempt.item_id)) postingAttempts.set(attempt.item_id, attempt.at);
-  const postingEntries = (state.postings?.items || []).filter(item => ['published', 'cancelled'].includes(item.status) || !accountIds.has(item.account_id)).map(item => ({
+  const postingEntries = (activePlatform === 'instagram' ? state.postings?.items || [] : []).filter(item => ['published', 'cancelled'].includes(item.status) || !accountIds.has(item.account_id)).map(item => ({
     type: 'postings', item, at: item.status === 'published' ? item.published_at || item.created_at : postingAttempts.get(item.id) || item.created_at
   }));
   const entries = [
@@ -1093,7 +1351,7 @@ function renderHistory() {
       const accountName = item.account_name || (account ? profileLabel(account) : 'Conta removida');
       const filename = item.file.split(/[\\/]/).pop();
       const statusLabel = { published: 'Publicado', cancelled: 'Cancelado', attention: 'Precisa de atenção', uncertain: 'Resultado incerto', queued: 'Cancelado com a conta' }[item.status] || item.status;
-      body.append(element('span', 'history-kind', `Postagem · Instagram${item.queue_kind === 'shared' ? ' · Fila única' : ''}`), element('strong', '', `${filename} · ${statusLabel}`), element('p', '', accountName));
+      body.append(element('span', 'history-kind', `Postagem · Instagram${item.queue_kind === 'shared' ? ' · Antiga Fila única' : ''}`), element('strong', '', `${filename} · ${statusLabel}`), element('p', '', accountName));
       if (item.error) body.append(element('p', 'history-message', item.error));
       row.append(time, body);
       if (item.status === 'published' && item.permalink) row.append(actionButton('Abrir Reel', () => window.studio.openPublishedReel(item.id)));
@@ -1224,6 +1482,10 @@ $('#check-campaign').addEventListener('click', async event => {
 window.onAutomation(next => { state.automation = next.automation; state.events = next.events; state.attempts = next.attempts; if (currentPage === 'history') render(); else renderAutomation(); });
 function renderMedia() {
   const busy = mediaState.running || downloadState.running;
+  $('#download-links').placeholder = ({instagram:'https://www.instagram.com/reel/…',tiktok:'https://www.tiktok.com/@perfil/video/…',x:'https://x.com/perfil/status/…'})[activePlatform] + '\nhttps://youtu.be/…';
+  const networkNames = { Instagram: 'instagram', TikTok: 'tiktok', X: 'x' };
+  const otherNetworkLinks = downloadState.links.filter(item => networkNames[item.platform] && networkNames[item.platform] !== activePlatform);
+  const visibleLinks = downloadState.links.filter(item => !networkNames[item.platform] || networkNames[item.platform] === activePlatform);
   const list = $('#media-video-list'); list.replaceChildren();
   if (!mediaState.videos.length) list.append(element('p', '', 'Nenhum vídeo selecionado.'));
   else mediaState.videos.forEach((video, index) => {
@@ -1248,14 +1510,15 @@ function renderMedia() {
   else if (!downloadState.totalFound) linkList.append(element('p', '', 'Nenhum link informado.'));
   else {
     const groups = new Map();
-    downloadState.links.forEach(item => groups.set(item.label, (groups.get(item.label) || 0) + 1));
+    visibleLinks.forEach(item => groups.set(item.label, (groups.get(item.label) || 0) + 1));
     const platforms = [...groups].map(([label, count]) => label === 'Instagram Reels' ? `${count} Reel${count === 1 ? '' : 's'} do Instagram` : `${count} ${label}`).join(' · ');
     const ignored = downloadState.ignoredCount ? ` · ${downloadState.ignoredCount} ignorado${downloadState.ignoredCount === 1 ? '' : 's'}` : '';
-    const count = downloadState.links.length;
+    const count = visibleLinks.length;
     linkList.append(element('p', 'download-summary', `${count} link${count === 1 ? '' : 's'} válido${count === 1 ? '' : 's'}${platforms ? ` · ${platforms}` : ''}${ignored}`));
   }
+  if (otherNetworkLinks.length) linkList.append(element('p', 'download-link error', `Há ${otherNetworkLinks.length} link(s) de outra rede. Selecione essa rede no menu ou remova os links para continuar.`));
   $('#media-start').disabled = busy || (!mediaState.videos.length && !mediaState.images.length) || !mediaState.outputDir;
-  $('#download-start').disabled = busy || !downloadState.links.length || !mediaState.outputDir;
+  $('#download-start').disabled = busy || !downloadState.links.length || !mediaState.outputDir || otherNetworkLinks.length > 0;
   $('#download-links').disabled = busy;
   $('#download-pick-output').disabled = busy;
   $('#media-pick-videos').disabled = busy;
@@ -1292,6 +1555,7 @@ $('#download-links').addEventListener('input', event => {
   }, 300);
 });
 $('#download-start').addEventListener('click', async () => {
+  if (downloadState.links.some(item => ({ Instagram: 'instagram', TikTok: 'tiktok', X: 'x' })[item.platform] && ({ Instagram: 'instagram', TikTok: 'tiktok', X: 'x' })[item.platform] !== activePlatform)) { notify('Selecione a rede dos links no menu ou remova os links de outra rede.', true); return; }
   if (!downloadState.links.length || !mediaState.outputDir) { notify('Informe os links e escolha a pasta para downloads.', true); return; }
   downloadState.running = true; renderMedia();
   $('#download-progress').hidden = false; $('#download-progress progress').value = 0;
@@ -1357,12 +1621,27 @@ window.onDownloadProgress(progress => {
 });
 accountForm.addEventListener('submit', async event => {
   event.preventDefault(); const data = formData(event.target); const editing = Boolean(data.id);
+  data.name = String(data.name || '').trim();
+  if ((!data.name && (editing || data.platform !== 'instagram')) || data.name.length > 120) { notify('Informe um nome de conta com até 120 caracteres.', true); accountForm.elements.name.focus(); return; }
   data.handle = String(data.handle || '').trim().replace(/^@/, '');
-  if (!data.handle || data.handle.length > 80 || /\s|@/.test(data.handle)) { notify('Informe um @ sem espaços e com até 80 caracteres.', true); accountForm.elements.handle.focus(); return; }
-  if (state.accounts.some(account => account.id !== data.id && (account.platform || 'tiktok') === data.platform && account.handle?.toLocaleLowerCase('pt-BR') === data.handle.toLocaleLowerCase('pt-BR'))) { notify(`@${data.handle} já está cadastrado nesta rede.`, true); accountForm.elements.handle.focus(); return; }
-  data.name = data.handle;
+  if (data.handle && (data.handle.length > 80 || /\s|@/.test(data.handle))) { notify('O @ salvo nesta conta é inválido.', true); return; }
+  if (data.handle && state.accounts.some(account => account.id !== data.id && (account.platform || 'tiktok') === data.platform && account.handle?.toLocaleLowerCase('pt-BR') === data.handle.toLocaleLowerCase('pt-BR'))) { notify(`@${data.handle} já está cadastrado nesta rede.`, true); return; }
+  if (data.platform === 'instagram' && (accountTimes.length || (accountHadFixedSchedule && accountScheduleTouched))) {
+    if (!accountTimes.length) { accountScheduleError('Adicione ao menos um horário para atualizar esta agenda.'); $('#account-time-input').focus(); return; }
+    if (!editing || accountScheduleTouched) {
+      const variationMinutes = Number($('#account-time-variation').value);
+      if (!Number.isInteger(variationMinutes) || variationMinutes < 0 || variationMinutes > 1439) { accountScheduleError('Informe uma variação inteira entre 0 e 1439 minutos.'); $('#account-time-variation').focus(); return; }
+      const minutes = [...accountTimes].sort().map(time => Number(time.slice(0, 2)) * 60 + Number(time.slice(3)));
+      if (minutes.some((minute, index) => index && minute - minutes[index - 1] <= variationMinutes * 2)) { accountScheduleError('As janelas de variação dos horários não podem se sobrepor.'); $('#account-time-variation').focus(); return; }
+      const timeZone = $('#account-time-zone').value.trim();
+      if (!timeZone) { accountScheduleError('Informe o fuso horário da conta.'); $('#account-time-zone').focus(); return; }
+      try { new Intl.DateTimeFormat('pt-BR', { timeZone }); }
+      catch { accountScheduleError('Fuso horário inválido.'); $('#account-time-zone').focus(); return; }
+      data.postingSchedule = { mode: 'fixed', times: [...accountTimes], variationMinutes, timeZone };
+    }
+  }
   const platform = platformName(data.platform);
-  if (await action(event.submitter, () => editing ? window.studio.editAccount(data) : window.studio.addAccount(data), editing ? 'Conta atualizada.' : `Conta cadastrada. Abra o ${platform} para fazer o login.`)) resetAccountForm();
+  if (await action(event.submitter || $('#account-submit'), () => editing ? window.studio.editAccount(data) : window.studio.addAccount(data), editing ? 'Conta atualizada.' : `Conta cadastrada. Abra o ${platform} para fazer o login.`)) resetAccountForm();
 });
 const proxyPaste = $('#proxy-paste');
 let suggestedProxyName = '';
@@ -1394,7 +1673,20 @@ proxyForm.addEventListener('submit', async event => {
     catch (error) { $('#proxy-form-error').textContent = error.message; $('#proxy-form-error').hidden = false; return; }
   }
   const button = event.submitter || $('#proxy-submit'); button.disabled = true; const previous = button.textContent; button.textContent = editing ? 'Salvando…' : 'Testando e salvando…';
-  try { state = await (editing ? window.studio.editProxy(data) : window.studio.addProxy(data)); render(); resetProxyForm(); notify(editing ? 'Proxy atualizado.' : 'Proxy testado e salvo.'); }
+  try {
+    const previousIds = new Set(state.proxies.map(proxy => proxy.id));
+    state = await (editing ? window.studio.editProxy(data) : window.studio.addProxy(data));
+    const createdForAccount = proxyFromAccount && !editing ? state.proxies.find(proxy => !previousIds.has(proxy.id)) : null;
+    render();
+    resetProxyForm();
+    if (createdForAccount && $('#account-dialog').open) {
+      $('#account-connection-type').value = 'proxy';
+      syncAccountConnectionType();
+      accountForm.elements.proxyId.value = createdForAccount.id;
+      $('#account-submit').focus();
+    }
+    notify(editing ? 'Proxy atualizado.' : createdForAccount ? 'Proxy testado e selecionado. Conclua o cadastro da conta.' : 'Proxy testado e salvo.');
+  }
   catch (error) { $('#proxy-form-error').textContent = error.message; $('#proxy-form-error').hidden = false; }
   finally { button.disabled = false; if ($('#proxy-dialog').open) button.textContent = previous; }
 });

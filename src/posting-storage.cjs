@@ -59,7 +59,12 @@ class PostingStorage {
       const stream = fs.createReadStream(file);
       stream.on('error', () => { request.abort(); finish(new Error('Não foi possível ler o vídeo.')); });
       request.on('response', response => { let body = ''; response.on('data', chunk => { body += chunk; if (body.length > 1024 * 1024) request.abort(); }); response.on('end', () => { if (response.statusCode >= 400) finish(new Error('O Storage recusou o vídeo. Confira o bucket privado e as regras de acesso.')); else finish(); }); });
-      request.on('error', error => { const failure = new Error(`Falha ao enviar o vídeo pela ${connection.proxy ? 'conexão com proxy' : 'conexão direta'} da conta (${error.code || 'erro de rede'}).`); failure.proxyFailure = Boolean(connection.proxy); finish(failure); });
+      request.on('error', error => {
+        const code = String(error?.message || error?.code || '').match(/ERR_[A-Z_]+/)?.[0] || (typeof error?.code === 'string' ? error.code : 'erro de rede');
+        const failure = new Error(`Falha ao enviar o vídeo pela ${connection.proxy ? 'conexão com proxy' : 'conexão direta'} da conta (${code}).`);
+        failure.proxyFailure = Boolean(connection.proxy);
+        finish(failure);
+      });
       stream.pipe(request);
     });
     let signed;

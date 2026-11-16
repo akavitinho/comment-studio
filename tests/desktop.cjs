@@ -23,11 +23,11 @@ async function run({ mainWindow, handlers, prepareAccount, openAccount, dataDir,
     const at = new Date().toISOString();
     window.applyStudioState({ ...original, accounts: [...original.accounts, { id: 'tiktok-metrics-fixture', platform: 'tiktok', name: 'TikTok Teste', handle: 'creator', tiktokAnalytics: { connected: true, username: 'creator' } }], tiktokInsights: { videos: [{ account_id: 'tiktok-metrics-fixture', video_id: '123', title: 'Vídeo teste', created_at: at, fetched_at: at, views: 125, likes: 12, comments: 3, shares: 2 }], history: [{ account_id: 'tiktok-metrics-fixture', video_id: '123', fetched_at: new Date(Date.now() - 120000).toISOString(), views: 100, likes: 10, comments: 2, shares: 1 }, { account_id: 'tiktok-metrics-fixture', video_id: '123', fetched_at: at, views: 125, likes: 12, comments: 3, shares: 2 }] }, campaignAnalytics: [{ platform: 'tiktok', accountId: 'tiktok-metrics-fixture', hour: at, comments: 2, replies: 0, likes: 0, uncertain: 1 }] });
     document.querySelector('#dashboard-platform').value = 'tiktok'; document.querySelector('#dashboard-platform').dispatchEvent(new Event('change'));
-    const valid = !document.querySelector('#dashboard-tiktok-panel').hidden && document.querySelector('#dashboard-tiktok-summary').textContent.includes('+25 visualizações') && document.querySelector('#dashboard-tiktok-videos').textContent.includes('Vídeo teste') && !document.querySelector('#dashboard-refresh-insights').disabled && document.querySelector('#dashboard-campaign-stats').textContent.includes('Comentários TikTok2') && document.querySelector('#dashboard-campaign-accounts').textContent.includes('@creator');
+    const valid = !document.querySelector('#dashboard-tiktok-panel').hidden && document.querySelector('#dashboard-tiktok-summary').textContent.includes('+25 visualizações') && document.querySelector('#dashboard-tiktok-videos').textContent.includes('Vídeo teste') && !document.querySelector('#dashboard-refresh-insights').disabled && document.querySelector('#dashboard-campaign-stats').textContent.includes('Comentários TikTok2') && document.querySelector('#dashboard-campaign-accounts').textContent.includes('TikTok Teste');
     window.applyStudioState(original); document.querySelector('#dashboard-platform').value = 'instagram'; document.querySelector('#dashboard-platform').dispatchEvent(new Event('change'));
     return valid;
   })()`), true, 'dashboard mostra crescimento TikTok após duas leituras');
-  assert.equal(await evaluate(`document.querySelectorAll('.nav-group>.nav-item .nav-icon').length === 0 && [...document.querySelectorAll('.nav-group>.nav-item .nav-label')].every(label => getComputedStyle(label).display !== 'none')`), true, 'subopções exibem texto sem ícones repetidos');
+  assert.equal(await evaluate(`document.querySelectorAll('.nav-group .nav-item').length === 0 && document.querySelectorAll('.nav-general [data-page="campaign"], .nav-general [data-page="x"]').length === 2`), true, 'campanhas ficam em Geral e redes não possuem submenus');
   assert.equal(await evaluate(`(async () => {
     const original = await window.studio.state();
     const at = new Date().toISOString();
@@ -38,7 +38,7 @@ async function run({ mainWindow, handlers, prepareAccount, openAccount, dataDir,
     document.querySelector('[data-page="dashboard"]').click();
     const cards = [...document.querySelectorAll('#dashboard-metrics .dashboard-metric strong')].map(node => node.textContent);
     const publicationLine = document.querySelector('#dashboard-chart .insights-publication-line');
-    const valid = cards[0] === '30' && cards[1] === '—' && cards[2] === '1' && document.querySelectorAll('#dashboard-chart svg circle').length === 2 && publicationLine?.getAttribute('points') && document.querySelector('.insights-chart-legend').textContent.includes('Reels postados') && document.querySelector('#dashboard-queue').textContent.includes('Instagram') && document.querySelector('#dashboard-hourly').textContent.includes('@painel') && document.querySelector('#dashboard-hourly').textContent.includes('+30');
+    const valid = cards[0] === '30' && cards[1] === '—' && cards[2] === '1' && document.querySelectorAll('#dashboard-chart svg circle').length === 2 && publicationLine?.getAttribute('points') && document.querySelector('.insights-chart-legend').textContent.includes('Reels postados') && document.querySelector('#dashboard-queue').textContent.includes('Instagram') && document.querySelector('#dashboard-hourly').textContent.includes('Perfil painel') && document.querySelector('#dashboard-hourly').textContent.includes('+30');
     const clarity = document.querySelector('#dashboard-metrics .dashboard-metric span').textContent === 'Novas visualizações no período'
       && document.querySelector('#dashboard-metrics .dashboard-metric small').textContent.includes('Última coleta:')
       && document.querySelector('#dashboard-refresh-status').textContent.includes('Última coleta:')
@@ -222,7 +222,80 @@ async function run({ mainWindow, handlers, prepareAccount, openAccount, dataDir,
   assert.equal(await evaluate(`(() => { const card = [...document.querySelectorAll('#account-list .account-card')].find(node => node.textContent.includes('@perfil.instagram')); return card?.textContent.includes('Instagram') && [...card.querySelectorAll('.account-more-menu button')].some(button => button.textContent === 'Abrir navegador livre'); })()`), true, 'conta Instagram identificada com ações no menu');
   assert.equal(await evaluate(`(() => { const stats=[...document.querySelectorAll('#account-overview .account-stat strong')].map(node=>Number(node.textContent)); const cards=[...document.querySelectorAll('#account-list .account-card')]; const instagram=cards.find(card=>card.textContent.includes('@perfil.instagram')); return stats[0]===4 && stats[2]===1 && cards.length===4 && instagram?.querySelector('.account-more-menu').textContent.includes('Conectar Instagram') && !cards.find(card=>card.textContent.includes('@perfil_x')).querySelector('.account-more-menu').textContent.includes('Conectar Instagram'); })()`), true, 'indicadores e ações específicas usam estado real');
   assert.equal(await evaluate(`(() => { const platform=document.querySelector('#account-platform-filter'); platform.value='instagram'; platform.dispatchEvent(new Event('change')); const onlyInstagram=document.querySelectorAll('#account-list .account-card').length===1; platform.value='all'; platform.dispatchEvent(new Event('change')); const query=document.querySelector('#account-search'); query.value='perfil_x'; query.dispatchEvent(new Event('input')); const searchWorks=document.querySelectorAll('#account-list .account-card').length===1; query.value=''; query.dispatchEvent(new Event('input')); const status=document.querySelector('#account-status-filter'); status.value='unknown'; status.dispatchEvent(new Event('change')); const unknown=document.querySelectorAll('#account-list .account-card').length===3; status.value='all'; status.dispatchEvent(new Event('change')); return onlyInstagram && searchWorks && unknown; })()`), true, 'filtros de plataforma, pesquisa e status');
-  assert.equal(await evaluate(`(() => { document.querySelector('#open-account-form').click(); const dialog=document.querySelector('#account-dialog'); const opened=dialog.open; const type=document.querySelector('#account-connection-type'); type.value='proxy'; type.dispatchEvent(new Event('change')); const proxyRequired=document.querySelector('#proxy-select').required && !document.querySelector('#account-proxy-field').hidden; document.querySelector('#account-dialog-close').click(); return opened && proxyRequired && !dialog.open; })()`), true, 'modal de cadastro abre, valida proxy e fecha');
+  assert.equal(await evaluate(`(async () => {
+    const original = await window.studio.state();
+    const accounts = [{ id: 'rank-low', platform: 'instagram', name: 'A baixo' }, { id: 'rank-high', platform: 'instagram', name: 'Z alto' }];
+    window.applyStudioState({ ...original, accounts: [...original.accounts, ...accounts], accountMetrics: {
+      views: { window: { from: 0, to: 86400000 }, values: { 'rank-low': { value: 10 }, 'rank-high': { value: 90 } } },
+      reach: { window: { from: 0, to: 86400000 }, values: { 'rank-low': { value: 100 }, 'rank-high': { value: 0 } } }
+    } });
+    const sort = document.querySelector('#account-sort');
+    sort.value = 'views'; sort.dispatchEvent(new Event('change'));
+    const ids = () => [...document.querySelectorAll('#account-list .account-group')].find(group => group.querySelector('summary strong').textContent === 'Instagram').querySelectorAll('.account-card');
+    const views = [...ids()].map(card => card.dataset.accountId).indexOf('rank-high') < [...ids()].map(card => card.dataset.accountId).indexOf('rank-low') && [...ids()].find(card => card.dataset.accountId === 'rank-high').textContent.includes('Visualizações: 90');
+    sort.value = 'reach'; sort.dispatchEvent(new Event('change'));
+    const reach = [...ids()].map(card => card.dataset.accountId).indexOf('rank-low') < [...ids()].map(card => card.dataset.accountId).indexOf('rank-high') && [...ids()].find(card => card.dataset.accountId === 'rank-high').textContent.includes('Alcance: 0');
+    const cached = document.querySelector('#account-metric-note').textContent.includes('sem nova busca');
+    sort.value = 'name'; sort.dispatchEvent(new Event('change')); window.applyStudioState(original);
+    return views && reach && cached;
+  })()`), true, 'contas ordenam métricas salvas, inclusive alcance zero, sem nova busca');
+  assert.equal(await evaluate(`(() => {
+    document.querySelector('#open-account-form').click();
+    const dialog = document.querySelector('#account-dialog');
+    const form = document.querySelector('#account-form');
+    const opened = dialog.open && form.elements.handle.type === 'hidden' && dialog.querySelectorAll('label').length === [...dialog.querySelectorAll('label')].filter(label => !label.textContent.includes('@ do perfil')).length;
+    form.elements.name.value = 'Conta em cadastro';
+    dialog.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    form.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+    dialog.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+    dialog.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    const draftKept = dialog.open && form.elements.name.value === 'Conta em cadastro';
+    const type = document.querySelector('#account-connection-type'); type.value = 'proxy'; type.dispatchEvent(new Event('change'));
+    const proxyRequired = document.querySelector('#proxy-select').required && !document.querySelector('#account-proxy-field').hidden;
+    document.querySelector('#account-add-proxy').click();
+    const proxyDialog = document.querySelector('#proxy-dialog');
+    document.querySelector('#proxy-form').elements.name.value = 'Proxy em cadastro';
+    proxyDialog.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    const proxyKept = proxyDialog.open && document.querySelector('#proxy-form').elements.name.value === 'Proxy em cadastro' && dialog.open && form.elements.name.value === 'Conta em cadastro';
+    document.querySelector('#proxy-dialog-close').click();
+    const returned = dialog.matches(':modal') && !proxyDialog.open && form.elements.name.value === 'Conta em cadastro';
+    document.querySelector('#account-dialog-close').click();
+    return opened && draftKept && proxyRequired && proxyKept && returned && !dialog.open;
+  })()`), true, 'clique ou arrasto fora preserva cadastro e proxy; só os botões fecham');
+  await evaluate(`(() => { document.querySelector('#open-account-form').click(); const form=document.querySelector('#account-form'); form.elements.platform.value='instagram'; form.elements.platform.dispatchEvent(new Event('change')); form.elements.name.value='Agenda de testes'; document.querySelector('#account-tag-create').click(); })()`);
+  assert.equal(await evaluate(`document.querySelector('#account-tag-dialog').matches(':modal') && document.querySelector('#account-dialog').open && document.querySelector('#account-form').elements.name.value === 'Agenda de testes'`), true, 'criação da tag preserva o cadastro da conta');
+  await evaluate(`(() => { const form=document.querySelector('#account-tag-form'); form.elements.name.value='Moda'; form.elements.color.value='#cc3366'; form.requestSubmit(); })()`);
+  for (let n = 0; n < 30 && !handlers.state().accountTags?.some(tag => tag.name === 'Moda'); n++) await wait(50);
+  assert.deepEqual(handlers.state().accountTags.find(tag => tag.name === 'Moda'), { name: 'Moda', color: '#cc3366' }, 'tag criada com a cor escolhida');
+  assert.equal(await evaluate(`document.querySelector('#account-tag-options [aria-pressed="true"] .account-tag')?.textContent === '#Moda' && document.querySelector('#account-tags-input').value === 'Moda'`), true, 'nova tag fica selecionada no cadastro');
+  await evaluate(`(() => { const form=document.querySelector('#account-form'); const time=document.querySelector('#account-time-input'); time.value='16:00'; time.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true,cancelable:true})); time.value='19:00'; time.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true,cancelable:true})); document.querySelector('#account-time-variation').value='10'; form.requestSubmit(); })()`);
+  for (let n = 0; n < 30 && !handlers.state().accounts.some(account => account.name === 'Agenda de testes'); n++) await wait(50);
+  const scheduledAccount = handlers.state().accounts.find(account => account.name === 'Agenda de testes');
+  if (!scheduledAccount) throw new Error(`Cadastro com horários falhou: ${JSON.stringify(await evaluate(`(() => { const form=document.querySelector('#account-form'); return { open:document.querySelector('#account-dialog').open, valid:form.checkValidity(), invalid:[...form.elements].filter(input=>!input.validity.valid).map(input=>({id:input.id,name:input.name,message:input.validationMessage})), scheduleError:document.querySelector('#account-schedule-error').textContent, notice:document.querySelector('#notice span').textContent, platform:form.elements.platform.value, handle:form.elements.handle.value, times:[...document.querySelectorAll('#account-time-list .posting-time-chip')].map(node=>node.textContent) }; })()`))}`);
+  assert.ok(scheduledAccount, 'cadastro cria a conta Instagram com horários');
+  assert.equal(scheduledAccount.name, 'Agenda de testes', 'nome livre identifica a conta');
+  assert.equal(scheduledAccount.handle, '', 'cadastro novo não exige outro campo de @');
+  assert.deepEqual(scheduledAccount.tags, ['Moda'], 'cadastro salva a tag selecionada');
+  assert.deepEqual(handlers.state().postings.schedules.find(schedule => schedule.account_id === scheduledAccount.id)?.config, { mode: 'fixed', times: ['16:00', '19:00'], variationMinutes: 10, timeZone: 'America/Sao_Paulo' }, 'cadastro salva os horários junto com a conta');
+  assert.equal(await evaluate(`(() => { const card=document.querySelector('#account-list .account-card[data-account-id="${scheduledAccount.id}"]'); const badge=card.querySelector('.account-tag'); const tagFilter=document.querySelector('#account-tag-filter'); tagFilter.value='moda'; tagFilter.dispatchEvent(new Event('change')); const filtered=document.querySelectorAll('#account-list .account-card').length===1; tagFilter.value='all'; tagFilter.dispatchEvent(new Event('change')); const refreshed=document.querySelector('#account-list .account-card[data-account-id="${scheduledAccount.id}"]'); [...refreshed.querySelectorAll('.account-more-menu button')].find(button=>button.textContent==='Editar conta').click(); const times=[...document.querySelectorAll('#account-time-list .posting-time-chip span:first-child')].map(node=>node.textContent); const valid=card.textContent.includes('Agenda de testes') && badge?.textContent==='#Moda' && badge.style.getPropertyValue('--tag-color')==='#cc3366' && filtered && document.querySelector('#account-tag-options [aria-pressed="true"] .account-tag')?.textContent==='#Moda' && document.querySelector('#account-schedule').hidden===false && times.join(',')==='16:00,19:00' && document.querySelector('#account-time-variation').value==='10'; document.querySelector('#cancel-account-edit').click(); return valid; })()`), true, 'nome e tag colorida aparecem na conta e voltam ao editar');
+  handlers.saveAccountTag({ originalName: 'Moda', name: 'Moda nova', color: '#119944' });
+  assert.deepEqual(handlers.state().accounts.find(account => account.id === scheduledAccount.id).tags, ['Moda nova'], 'renomear a tag atualiza as contas vinculadas');
+  await handlers.deleteAccount(scheduledAccount.id);
+  const legacyTagged = handlers.addAccount({ platform: 'tiktok', name: 'Conta com tag antiga', tags: 'Contas antigas' }).accounts.find(account => account.name === 'Conta com tag antiga');
+  handlers.saveAccountTag({ originalName: 'Contas antigas', name: 'Contas antigas', color: '#2255aa' });
+  assert.equal(handlers.state().accountTags.find(tag => tag.name === 'Contas antigas')?.color, '#2255aa', 'tag de conta existente pode receber uma cor');
+  assert.deepEqual(handlers.state().accounts.find(account => account.id === legacyTagged.id).tags, ['Contas antigas']);
+  await handlers.deleteAccount(legacyTagged.id);
+  await evaluate(`(() => { document.querySelector('#open-account-form').click(); const form=document.querySelector('#account-form'); form.elements.name.value='Conta livre com espaços'; form.requestSubmit(); })()`);
+  for (let n = 0; n < 30 && !handlers.state().accounts.some(account => account.name === 'Conta livre com espaços'); n++) await wait(50);
+  const namedAccount = handlers.state().accounts.find(account => account.name === 'Conta livre com espaços');
+  assert.equal(namedAccount?.handle, '', 'conta pode ser cadastrada apenas com nome livre');
+  await handlers.deleteAccount(namedAccount.id);
+  assert.throws(() => handlers.addAccount({ platform: 'instagram', name: 'Agenda inválida', handle: 'agenda.invalida', postingSchedule: { mode: 'fixed', times: ['16:00', '16:10'], variationMinutes: 10, timeZone: 'America/Sao_Paulo' } }), /sobrepor/, 'horários inválidos impedem o cadastro da conta');
+  assert.equal(handlers.state().accounts.some(account => account.handle === 'agenda.invalida'), false, 'agenda rejeitada não deixa uma conta incompleta');
+  await evaluate(`window.studio.state().then(window.applyStudioState)`);
+  assert.equal(await evaluate(`(() => { document.querySelector('#open-account-form').click(); const form=document.querySelector('#account-form'); form.elements.platform.value='instagram'; form.elements.platform.dispatchEvent(new Event('change')); const optional=!form.elements.name.required && !document.querySelector('#account-name-help').hidden; document.querySelector('#account-dialog-close').click(); return optional; })()`), true, 'Instagram aceita cadastro sem digitar o nome antes da conexão');
+  assert.equal(await evaluate(`(async () => { const original=await window.studio.state(); const proxy={id:'proxy-title-fixture',name:'002',host:'proxy.example',port:8080,protocol:'http'}; const account={id:'account-title-fixture',platform:'instagram',name:'vivimoraguin',handle:'vivimoraguin',proxyId:proxy.id,tags:[]}; const state={...original,accounts:[...original.accounts,account],proxies:[...original.proxies,proxy]}; window.applyStudioState(state); const card=document.querySelector('[data-proxy-id="proxy-title-fixture"]'); const individual=card?.querySelector('h3')?.textContent==='Proxy @vivimoraguin' && card?.textContent.includes('002') && [...document.querySelector('#proxy-select').options].some(option=>option.value===proxy.id && option.textContent==='Proxy @vivimoraguin'); window.applyStudioState({...state,accounts:[...state.accounts,{...account,id:'second-title-fixture'}]}); const shared=document.querySelector('[data-proxy-id="proxy-title-fixture"] h3')?.textContent==='002'; window.applyStudioState(original); return individual && shared; })()`), true, 'proxy individual mostra o @ oficial e proxy compartilhada mantém o próprio título');
   assert.equal(await evaluate(`(() => { const card=[...document.querySelectorAll('#account-list .account-card')].find(node=>node.textContent.includes('@perfil.instagram')); const details=card.querySelector('.account-details'); details.open=true; const expanded=details.textContent.includes('Meta:') && details.textContent.includes('Conexão ainda não testada'); const menu=card.querySelector('.account-more'); menu.open=true; const actions=[...menu.querySelectorAll('button')].map(button=>button.textContent); return expanded && actions.includes('Conectar Instagram') && actions.includes('Testar conexão') && actions.includes('Excluir conta'); })()`), true, 'detalhes e menu preservam ações da conta Instagram');
   assert.equal(await evaluate(`document.querySelectorAll('#account-list .platform-icon[data-platform="tiktok"]').length === 2 && document.querySelectorAll('#account-list .platform-icon[data-platform="instagram"]').length === 1 && document.querySelectorAll('#account-list .platform-icon[data-platform="x"]').length === 1`), true, 'ícones identificam TikTok, Instagram e X nos cartões das contas');
   assert.equal(await evaluate(`(() => {
@@ -310,9 +383,13 @@ async function run({ mainWindow, handlers, prepareAccount, openAccount, dataDir,
   const copiedConnection = await prepareAccount(copiedAccount.id);
   assert.equal(copiedConnection.ses, session.fromPartition(`persist:proxy-browser-${duplicate.id}`), 'conta da cópia usa somente seu navegador');
   await copiedConnection.ses.cookies.set({ url: 'https://session.example.test', name: 'proxy-login', value: 'temporario', expirationDate: Date.now() / 1000 + 3600 });
-  await handlers.deleteAccount(copiedAccount.id);
-  assert.equal((await copiedConnection.ses.cookies.get({ name: 'proxy-login' })).length, 0, 'excluir conta remove login do navegador da proxy vinculada');
-  await handlers.deleteProxy(duplicate.id);
+  await mainWindow.reload(); await wait(200);
+  await evaluate(`document.querySelector('[data-page="accounts"]').click()`);
+  assert.equal(await evaluate(`(() => { const card=document.querySelector('#account-list .account-card[data-account-id="${copiedAccount.id}"]'); return [...card.querySelectorAll('.account-more-menu button')].some(button => button.textContent === 'Excluir conta e proxy' && !button.disabled); })()`), true, 'conta com proxy exclusivo oferece exclusão conjunta');
+  await handlers.deleteAccount({ id: copiedAccount.id, deleteProxy: true });
+  assert.equal((await copiedConnection.ses.cookies.get({ name: 'proxy-login' })).length, 0, 'exclusão conjunta remove login do navegador da proxy vinculada');
+  assert.equal(handlers.state().accounts.some(item => item.id === copiedAccount.id), false, 'exclusão conjunta remove a conta');
+  assert.equal(handlers.state().proxies.some(item => item.id === duplicate.id), false, 'exclusão conjunta remove a proxy');
   await handlers.openProxyBrowser({ id: proxy.id });
   assert.equal(handlers.state().proxies[0].browserOpen, true, 'navegador livre usa o proxy selecionado');
   await handlers.closeProxyBrowser(proxy.id);
@@ -381,6 +458,9 @@ async function run({ mainWindow, handlers, prepareAccount, openAccount, dataDir,
   const secondAccount = store.data.accounts[1];
   await handlers.editAccount({ id: secondAccount.id, name: 'Conta editada', handle: 'perfil.editado', proxyId: proxy.id });
   assert.equal(new Store(dataDir).data.accounts.find(item => item.id === secondAccount.id).proxyId, proxy.id, 'conta editada persiste com proxy');
+  await mainWindow.reload(); await wait(200);
+  await evaluate(`document.querySelector('[data-page="accounts"]').click()`);
+  assert.equal(await evaluate(`(() => { const card=document.querySelector('#account-list .account-card[data-account-id="${secondAccount.id}"]'); return [...card.querySelectorAll('.account-more-menu button')].some(button => button.textContent === 'Excluir conta e proxy' && button.disabled); })()`), true, 'proxy compartilhado desabilita exclusão conjunta no menu');
   assert.equal(store.data.accounts.find(item => item.id === secondAccount.id).browserProfile, 'account', 'outra conta no mesmo cadastro mantém sessão própria');
   assert.throws(() => handlers.useProxyBrowser(secondAccount.id), /sessão separada/, 'uma proxy não vincula duas contas à mesma sessão');
   const separateConnection = await prepareAccount(secondAccount.id);
@@ -389,6 +469,9 @@ async function run({ mainWindow, handlers, prepareAccount, openAccount, dataDir,
   await handlers.openAccountBrowser(secondAccount.id);
   assert.equal(store.data.accounts.find(item => item.id === secondAccount.id).browserProfile, 'account', 'abrir a segunda conta não troca sua sessão');
   await handlers.closeAccountBrowser(secondAccount.id);
+  await assert.rejects(() => handlers.deleteAccount({ id: secondAccount.id, deleteProxy: true }), /outra\(s\) conta\(s\)/, 'proxy compartilhado impede exclusão conjunta');
+  assert.equal(handlers.state().accounts.some(item => item.id === secondAccount.id), true, 'exclusão conjunta recusada preserva a conta');
+  assert.equal(handlers.state().proxies.some(item => item.id === proxy.id), true, 'exclusão conjunta recusada preserva a proxy');
   assert.equal(handlers.state().accounts.find(item => item.id === secondAccount.id).name, 'Conta editada');
   await b.ses.cookies.set({ url: 'https://session.example.test', name: 'remove-me', value: 'private', expirationDate: Date.now() / 1000 + 3600 });
   await openAccount(secondAccount.id);

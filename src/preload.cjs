@@ -1,13 +1,13 @@
 const { contextBridge, ipcRenderer } = require('electron');
 const methods = ['state', 'openGeoSource', 'addAccount', 'editAccount', 'deleteAccount', 'useProxyBrowser', 'addProxy', 'duplicateProxy', 'editProxy', 'deleteProxy', 'openProxyBrowser', 'closeProxyBrowser', 'openAccountBrowser', 'closeAccountBrowser', 'saveCampaign', 'startCampaign', 'stopCampaign', 'pauseCampaign', 'resumeCampaign', 'checkCampaign', 'openAttempt', 'openAccount', 'closeAccount', 'testConnection', 'testProxy', 'pickMediaVideos', 'pickMediaCover', 'pickMediaImages', 'pickMediaOutput', 'startMediaJob', 'cancelMediaJob', 'inspectDownloadLinks', 'startDownloadJob', 'cancelDownloadJob', 'openMediaOutput'];
 methods.push('resumeAccount');
+methods.push('saveAccountTag');
 methods.push('pauseAccount');
 methods.push('restartAccountCycle');
 methods.push('saveXCampaign', 'startXCampaign', 'pauseXCampaign', 'resumeXCampaign', 'stopXCampaign', 'pauseXAccount', 'resumeXAccount', 'stopXAccount', 'checkXCampaign', 'openXAttempt');
 methods.push('savePostingSchedule', 'savePostingSchedules', 'addPostingVideo', 'updatePostingVideo', 'removePostingVideo', 'controlPosting', 'startQueuedPostings');
 methods.push('movePostingVideo', 'retryPostingVideo');
 methods.push('clearPostingQueue');
-methods.push('addSharedPostingVideos', 'controlSharedPosting');
 methods.push('pickPostingVideoFolder', 'savePostingMediaSettings', 'selectPostingFolder', 'importPostingFolder');
 methods.push('previewPostingSchedule');
 methods.push('saveMetaSettings', 'connectMeta', 'disconnectMeta');
