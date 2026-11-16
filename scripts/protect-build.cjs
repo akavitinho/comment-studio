@@ -6,7 +6,7 @@ const root = path.join(__dirname, '..');
 const stage = path.join(root, 'build', 'protected-app');
 const protectedModules = [
   'main.cjs', 'x-automation.cjs', 'posting-worker.cjs',
-  'posting-plan.cjs', 'meta-auth.cjs', 'posting-storage.cjs',
+  'posting-plan.cjs', 'meta-auth.cjs', 'facebook-auth.cjs', 'posting-storage.cjs',
   'meta-publisher.cjs', 'media.cjs', 'downloader.cjs',
   'domain.cjs', 'x-domain.cjs', 'campaign-analytics.cjs'
 ];
@@ -14,6 +14,9 @@ const protectedModules = [
 fs.mkdirSync(stage, { recursive: true });
 fs.cpSync(path.join(root, 'src'), path.join(stage, 'src'), { recursive: true, force: true });
 fs.cpSync(path.join(root, 'tests'), path.join(stage, 'tests'), { recursive: true, force: true });
+for (const name of fs.readdirSync(path.join(stage, 'tests')).filter(name => name.endsWith('.test.cjs'))) {
+  if (!fs.existsSync(path.join(root, 'tests', name))) fs.rmSync(path.join(stage, 'tests', name));
+}
 fs.cpSync(path.join(root, 'vendor'), path.join(stage, 'vendor'), { recursive: true, force: true });
 fs.cpSync(path.join(root, 'supabase'), path.join(stage, 'supabase'), { recursive: true, force: true });
 fs.copyFileSync(path.join(root, 'package.json'), path.join(stage, 'package.json'));

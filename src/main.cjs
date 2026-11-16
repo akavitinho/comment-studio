@@ -17,6 +17,7 @@ const { VideoDownloader, analyzeLinks } = require('./downloader.cjs');
 const { PostingPlan, validateConfig: validatePostingConfig } = require('./posting-plan.cjs');
 const { syncPostingFolders } = require('./posting-folder-sync.cjs');
 const { MetaAuth } = require('./meta-auth.cjs');
+const { FacebookAuth } = require('./facebook-auth.cjs');
 const { TikTokAnalytics } = require('./tiktok-analytics.cjs');
 const { PostingStorage } = require('./posting-storage.cjs');
 const { PostingWorker } = require('./posting-worker.cjs');
@@ -45,7 +46,7 @@ const homeURL = pathToFileURL(path.join(__dirname, 'ui', 'index.html')).href;
 const execFileAsync = promisify(execFile);
 const thumbnailCache = new Map();
 const postingProfilePictures = new Map();
-let mainWindow, store, automation, xAutomation, mediaProcessor, videoDownloader, postingPlan, metaAuth, tiktokAnalytics, postingStorage, postingWorker;
+let mainWindow, store, automation, xAutomation, mediaProcessor, videoDownloader, postingPlan, metaAuth, facebookAuth, tiktokAnalytics, postingStorage, postingWorker;
 let postingFolderSyncTimer;
 const accountWindows = new Map();
 const proxyBrowserWindows = new Map();
@@ -120,17 +121,19 @@ function getAccount(id) {
 }
 function accountPlatform(account) {
   if (account.platform === 'instagram') return { id: 'instagram', label: 'Instagram', login: 'https://www.instagram.com/accounts/login/', home: 'https://www.instagram.com/' };
+  if (account.platform === 'facebook') return { id: 'facebook', label: 'Facebook', login: 'https://www.facebook.com/login/', home: 'https://www.facebook.com/' };
   if (account.platform === 'x') return { id: 'x', label: 'X', login: 'https://x.com/i/flow/login', home: 'https://x.com/home' };
   return { id: 'tiktok', label: 'TikTok', login: 'https://www.tiktok.com/login', home: 'https://www.tiktok.com/foryou' };
 }
 function snapshot() {
   return {
-    accounts: store.data.accounts.map(a => ({ ...a, open: accountWindows.has(a.id), browserOpen: freeAccountWindows.has(a.id), error: lastErrors.get(a.id) || null, meta: a.platform === 'instagram' ? metaAuth?.status(a.id) : undefined, tiktokAnalytics: a.platform === 'tiktok' ? tiktokAnalytics?.status(a.id) : undefined })),
+    accounts: store.data.accounts.map(a => ({ ...a, open: accountWindows.has(a.id), browserOpen: freeAccountWindows.has(a.id), error: lastErrors.get(a.id) || null, meta: a.platform === 'instagram' ? metaAuth?.status(a.id) : undefined, facebook: a.platform === 'facebook' ? facebookAuth?.status(a.id) : undefined, tiktokAnalytics: a.platform === 'tiktok' ? tiktokAnalytics?.status(a.id) : undefined })),
     accountTags: store.data.accountTags || [],
     proxies: store.data.proxies.map(({ credentials, ...p }) => ({ ...p, authenticated: Boolean(credentials), browserOpen: Boolean(proxyBrowserWindows.get(p.id) && !proxyBrowserWindows.get(p.id).isDestroyed()) })),
     campaign: store.data.campaign, events: store.data.events, automation: automation?.snapshot(),
     xCampaign: store.data.xCampaign || null, xAutomation: xAutomation?.snapshot(),
     postings: postingPlan?.snapshot(),
+    facebookMetrics: postingPlan?.db.prepare('SELECT * FROM facebook_page_insights').all() || [],
     accountMetrics: postingPlan?.accountInsights?.latestRanking(store.data.accounts.filter(account => account.platform === 'instagram').map(account => account.id)),
     metaSettings: metaAuth?.settings(),
     tiktokAnalyticsSettings: tiktokAnalytics?.settings(),
@@ -452,6 +455,58 @@ const handlers = {
   savePostingStorage: input => { if (postingWorker.active.size) throw new Error('Aguarde as publicações em andamento antes de alterar o Storage.'); postingStorage.configure(input); return snapshot(); },
   openPublishedReel: async id => { const item = postingPlan.db.prepare('SELECT permalink FROM items WHERE id=? AND status=?').get(id, 'published'); const url = item?.permalink ? new URL(item.permalink) : null; if (!url || url.protocol !== 'https:' || !['instagram.com', 'www.instagram.com'].includes(url.hostname)) throw new Error('Link do Reel indisponível.'); await shell.openExternal(url.toString()); return true; },
   openPublishedFacebookReel: async id => { const item = postingPlan.db.prepare('SELECT facebook_permalink FROM items WHERE id=? AND status=?').get(id, 'published'); const url = item?.facebook_permalink ? new URL(item.facebook_permalink) : null; if (!url || url.protocol !== 'https:' || !['facebook.com', 'www.facebook.com'].includes(url.hostname)) throw new Error('Link do Reel no Facebook indisponível.'); await shell.openExternal(url.toString()); return true; },
+  connectFacebook: async ({ proxyId = null } = {}) => {
+    const proxy = proxyId ? store.data.proxies.find(item => item.id === proxyId) : null;
+    if (proxyId && !proxy) throw new Error('Proxy não encontrada.');
+    const connection = await prepareConnection(`persist:facebook-login-${proxyId || 'direct'}`, { platform: 'facebook' }, proxy);
+    return facebookAuth.connect(connection);
+  },
+  bindFacebookPages: async ({ flowId, pageIds, proxyId = null }) => {
+    const proxy = proxyId ? store.data.proxies.find(item => item.id === proxyId) : null;
+    if (proxyId && !proxy) throw new Error('Proxy não encontrada.');
+    const pages = facebookAuth.takePages(flowId, pageIds);
+    for (const page of pages) {
+      let account = store.data.accounts.find(item => item.platform === 'facebook' && item.facebookPageId === page.id);
+      if (!account) { account = domain.account({ platform: 'facebook', name: page.name, proxyId }, store.data.proxies); account.facebookPageId = page.id; store.data.accounts.push(account); }
+      else { account.name = page.name; account.proxyId = proxyId; }
+      await facebookAuth.bind(account.id, page);
+    }
+    store.save(); return snapshot();
+  },
+  disconnectFacebook: id => { const account = getAccount(id); if (account.platform !== 'facebook') throw new Error('Selecione uma Página Facebook.'); if (postingWorker.active.has(id)) throw new Error('Aguarde a publicação em andamento.'); postingPlan.pauseAccount(id); facebookAuth.disconnect(id); return snapshot(); },
+  addFacebookPost: ({ accountId, type, file, caption, sourceItemId }) => { const account = getAccount(accountId); if (account.platform !== 'facebook') throw new Error('Selecione uma Página Facebook.'); postingPlan.addFacebook(accountId, { type, file, caption, sourceItemId }, account.name); return snapshot(); },
+  queueFacebookFromInstagram: ({ itemId, accountId }) => {
+    const source = postingPlan.db.prepare('SELECT * FROM items WHERE id=?').get(itemId);
+    const page = getAccount(accountId);
+    if (!source || getAccount(source.account_id).platform !== 'instagram' || page.platform !== 'facebook') throw new Error('Selecione um vídeo Instagram e uma Página Facebook.');
+    if (!facebookAuth.status(page.id).connected) throw new Error('Reconecte a Página Facebook antes de enviar o vídeo.');
+    postingPlan.addFacebook(page.id, { type: 'reel', file: source.file, caption: source.caption, sourceItemId: source.id }, page.name);
+    return snapshot();
+  },
+  saveFacebookSchedule: ({ accountId, ...config }) => { const account = getAccount(accountId); if (account.platform !== 'facebook') throw new Error('Selecione uma Página Facebook.'); if (postingWorker.active.has(accountId)) throw new Error('Aguarde a publicação em andamento.'); postingPlan.configure(accountId, config); return snapshot(); },
+  controlFacebookPosting: ({ accountId, status }) => {
+    const account = getAccount(accountId);
+    if (account.platform !== 'facebook') throw new Error('Selecione uma Página Facebook.');
+    if (status === 'running' && !facebookAuth.status(accountId).connected) throw new Error('Conecte a Página Facebook.');
+    if (status === 'running' && postingPlan.db.prepare("SELECT 1 FROM items WHERE account_id=? AND status='uncertain'").get(accountId)) throw new Error('Confira a postagem incerta antes de continuar.');
+    if (status === 'running' && postingPlan.db.prepare("SELECT 1 FROM items WHERE account_id=? AND content_type='reel' AND status='queued'").get(accountId) && !postingStorage.info().configured) throw new Error('Configure o Storage para publicar Reels.');
+    postingPlan.setStatus(accountId, status); if (status === 'running') void postingWorker.tick(); return snapshot();
+  },
+  retryFacebookPost: id => { const item = postingPlan.db.prepare('SELECT account_id FROM items WHERE id=?').get(id); if (!item || getAccount(item.account_id).platform !== 'facebook') throw new Error('Postagem Facebook não encontrada.'); if (postingWorker.active.has(item.account_id)) throw new Error('Aguarde a publicação em andamento.'); postingPlan.retryAttention(id); return snapshot(); },
+  resolveFacebookUncertain: ({ id, outcome }) => { const item = postingPlan.db.prepare('SELECT account_id FROM items WHERE id=?').get(id); if (!item || getAccount(item.account_id).platform !== 'facebook') throw new Error('Postagem Facebook não encontrada.'); if (postingWorker.active.has(item.account_id)) throw new Error('Aguarde a publicação em andamento.'); postingPlan.resolveUncertain(id, outcome); return snapshot(); },
+  refreshFacebookInsights: async accountId => {
+    const account = getAccount(accountId);
+    if (account.platform !== 'facebook' || !facebookAuth.status(accountId).connected) throw new Error('Conecte a Página Facebook.');
+    const token = await facebookAuth.token(accountId), connection = await prepareAccount(accountId);
+    const publisher = new MetaPublisher({ fetch: createProxyFetch(net, connection), version: 'v27.0' });
+    const metrics = {};
+    for (const metric of ['page_media_view', 'page_total_media_view_unique']) {
+      try { const data = await publisher.callFacebook('GET', `${account.facebookPageId}/insights`, token, { metric, period: 'day', since: Math.floor((Date.now() - 30 * 86400000) / 1000), until: Math.floor(Date.now() / 1000) }); const values = (data.data || []).flatMap(row => row.values || []); metrics[metric] = values.length ? values.reduce((total, value) => total + Number(value.value || 0), 0) : null; }
+      catch (error) { metrics[metric] = null; if (error.metaCode === 190) facebookAuth.markReconnect(accountId); }
+    }
+    postingPlan.db.prepare('INSERT INTO facebook_page_insights (account_id,media_views,unique_viewers,fetched_at) VALUES (?,?,?,?) ON CONFLICT(account_id) DO UPDATE SET media_views=excluded.media_views,unique_viewers=excluded.unique_viewers,fetched_at=excluded.fetched_at').run(accountId, metrics.page_media_view, metrics.page_total_media_view_unique, new Date().toISOString());
+    return snapshot();
+  },
   postingProfilePicture: id => {
     const account = getAccount(id);
     const profile = metaAuth.status(id);
@@ -656,7 +711,7 @@ const handlers = {
   },
   previewPostingSchedule: ({ accountId, ...config }) => { const account = getAccount(accountId); if (account.platform !== 'instagram') throw new Error('Selecione uma conta Instagram.'); return postingPlan.preview(accountId, config); },
   addPostingVideo: async ({ accountId, file, caption }) => { const account = getAccount(accountId); if (account.platform !== 'instagram') throw new Error('Selecione uma conta Instagram.'); postingPlan.add(accountId, file, caption, account.name); return snapshot(); },
-  savePostingMediaSettings: ({ accountId, ...changes }) => { const account = getAccount(accountId); if (account.platform !== 'instagram') throw new Error('Selecione uma conta Instagram.'); postingPlan.saveMediaSettings(accountId, changes); return snapshot(); },
+  savePostingMediaSettings: ({ accountId, facebookPageToken: _ignored, ...changes }) => { const account = getAccount(accountId); if (account.platform !== 'instagram') throw new Error('Selecione uma conta Instagram.'); if (changes.crossPostFacebook) { const pageId = changes.facebookPageId || postingPlan.mediaSettings(accountId).facebook_page_id; if (!store.data.accounts.some(page => page.platform === 'facebook' && page.facebookPageId === pageId && facebookAuth.status(page.id).connected)) throw new Error('Conecte e selecione uma Página Facebook.'); } postingPlan.saveMediaSettings(accountId, changes); return snapshot(); },
   selectPostingFolder: ({ accountId, folder }) => { const account = getAccount(accountId); if (account.platform !== 'instagram') throw new Error('Selecione uma conta Instagram.'); postingPlan.saveMediaSettings(accountId, { folder }); const result = postingPlan.importFolder(accountId, account.name); return { ...snapshot(), importedCount: result.importedCount, skippedCount: result.skippedCount }; },
   importPostingFolder: ({ accountId }) => { const account = getAccount(accountId); if (account.platform !== 'instagram') throw new Error('Selecione uma conta Instagram.'); const result = postingPlan.importFolder(accountId, account.name); return { ...snapshot(), importedCount: result.importedCount, skippedCount: result.skippedCount }; },
   updatePostingVideo: ({ id, ...changes }) => { postingPlan.updateItem(id, changes); return snapshot(); },
@@ -714,6 +769,7 @@ const handlers = {
     return snapshot();
   },
   addAccount: input => {
+    if (input.platform === 'facebook') throw new Error('Use Facebook → Postagens → Conectar Páginas para adicionar uma Página.');
     const account = domain.account(input, store.data.proxies);
     ensureFingerprint(account);
     if (input.postingSchedule) {
@@ -730,6 +786,7 @@ const handlers = {
     if (postingWorker.active.has(id)) throw new Error('Aguarde a publicação em andamento antes de editar a conta.');
     if (xAutomation.owns(id) || xAutomation.checking) throw new Error('Pare o X antes de editar esta conta.');
     const changes = domain.accountChanges(input, store.data.proxies);
+    if (changes.platform !== account.platform && (changes.platform === 'facebook' || account.platform === 'facebook')) throw new Error('Páginas Facebook são vinculadas pelo login Facebook e não podem trocar de plataforma.');
     if (postingSchedule) {
       if (changes.platform !== 'instagram' || postingSchedule.mode !== 'fixed') throw new Error('Horários de postagem exigem uma conta Instagram.');
       validatePostingConfig(postingSchedule);
@@ -802,6 +859,7 @@ const handlers = {
     }
     postingPlan.cancelAccount(id, account.name);
     metaAuth.disconnect(id);
+    facebookAuth.disconnect(id);
     tiktokAnalytics.delete(id);
     postingStorage.clearAccount(id);
     if (store.data.xCampaign) store.data.xCampaign.accountIds = store.data.xCampaign.accountIds.filter(item => item !== id);
@@ -998,10 +1056,22 @@ async function boot() {
   if (refreshedNames) store.log(`Nomes oficiais do Instagram atualizados em ${refreshedNames} conta(s).`);
   tiktokAnalytics = new TikTokAnalytics({ directory: dataDir, safeStorage, BrowserWindow, net, getConnection: prepareTikTokAnalyticsAccount, parent: () => mainWindow, registerLoginWindow: (win, connection) => { const id = win.webContents.id; authByContents.set(id, connection); win.on('closed', () => authByContents.delete(id)); } });
   postingStorage = new PostingStorage({ directory: dataDir, safeStorage, net });
+  facebookAuth = new FacebookAuth({ directory: dataDir, safeStorage, BrowserWindow, net, getStorageSettings: () => postingStorage.settings, parent: () => mainWindow, registerLoginWindow: (win, connection) => { const id = win.webContents.id; authByContents.set(id, connection); win.on('closed', () => authByContents.delete(id)); } });
+  for (const instagram of store.data.accounts.filter(account => account.platform === 'instagram')) {
+    const legacy = postingPlan.mediaSettings(instagram.id);
+    if (!legacy.facebook_page_id || !legacy.facebook_page_token) continue;
+    let page = store.data.accounts.find(account => account.platform === 'facebook' && account.facebookPageId === legacy.facebook_page_id);
+    const isNew = !page;
+    if (isNew) { page = domain.account({ platform: 'facebook', name: `Página Facebook ${legacy.facebook_page_id}`, proxyId: instagram.proxyId }, store.data.proxies); page.facebookPageId = legacy.facebook_page_id; }
+    try { await facebookAuth.migrateLegacy(page.id, legacy.facebook_page_id, legacy.facebook_page_token, page.name); }
+    catch (error) { store.log(`Não foi possível proteger a credencial antiga da Página Facebook: ${error.message}`); continue; }
+    if (isNew) { store.data.accounts.push(page); store.save(); }
+    postingPlan.db.prepare('UPDATE posting_media_settings SET facebook_page_token=NULL WHERE account_id=?').run(instagram.id);
+  }
   automation = new Automation({ store, getWindow: id => { const win = accountWindows.get(id); return win && !win.isDestroyed() ? win : undefined; }, openAccount, onChange: () => { refreshAccountTitles(); if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('studio:automation', snapshot()); } });
   xAutomation = new XAutomation({ store, getWindow: id => accountWindows.get(id), openAccount, onChange: () => { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('studio:x-automation', snapshot()); } });
   mainWindow = new BrowserWindow({ width: 1320, height: 920, minWidth: 560, minHeight: 600, show: !smoke && !xReadOnly, title: 'Comment Studio', backgroundColor: '#f5f7fa', webPreferences: { preload: path.join(__dirname, 'preload.cjs'), contextIsolation: true, sandbox: true, nodeIntegration: false } });
-  postingWorker = new PostingWorker({ plan: postingPlan, storage: postingStorage, auth: metaAuth, net, getConnection: prepareAccount, getAccount: id => store.data.accounts.find(a => a.id === id), onFailure: id => { if (id) lastErrors.set(id, 'Falha interna ao acessar a fila local. Reinicie o aplicativo antes de continuar.'); }, onChange: () => { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('studio:postings', snapshot()); } });
+  postingWorker = new PostingWorker({ plan: postingPlan, storage: postingStorage, auth: metaAuth, facebookAuth, getFacebookTarget: pageId => store.data.accounts.find(a => a.platform === 'facebook' && a.facebookPageId === pageId && facebookAuth.status(a.id).connected), net, getConnection: prepareAccount, getAccount: id => store.data.accounts.find(a => a.id === id), onFailure: id => { if (id) lastErrors.set(id, 'Falha interna ao acessar a fila local. Reinicie o aplicativo antes de continuar.'); }, onChange: () => { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('studio:postings', snapshot()); } });
   mediaProcessor = new MediaProcessor({ onProgress: progress => { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('studio:media-progress', progress); } });
   videoDownloader = new VideoDownloader({ executable: app.isPackaged ? binaryPath('yt-dlp') : path.join(root, 'vendor', 'yt-dlp.exe'), onProgress: progress => {
     if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('studio:download-progress', progress);

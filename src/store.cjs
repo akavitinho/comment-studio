@@ -9,7 +9,7 @@ class Store {
     let migrated = false;
     for (const account of this.data.accounts) {
       if (!account.platform) { account.platform = 'tiktok'; migrated = true; }
-      if (!['tiktok', 'instagram', 'x'].includes(account.platform)) throw new Error('Uma conta possui plataforma inválida. Preserve state.json antes de tentar recuperar.');
+      if (!['tiktok', 'instagram', 'facebook', 'x'].includes(account.platform)) throw new Error('Uma conta possui plataforma inválida. Preserve state.json antes de tentar recuperar.');
     }
     if (migrated) this.save();
   }

@@ -26,6 +26,7 @@ contextBridge.exposeInMainWorld('onInsightsProgress', callback => {
 });
 methods.push('saveTikTokAnalyticsSettings', 'connectTikTokAnalytics', 'disconnectTikTokAnalytics', 'refreshTikTokInsights');
 methods.push('resolveUncertainPosting');
+methods.push('connectFacebook', 'bindFacebookPages', 'disconnectFacebook', 'addFacebookPost', 'queueFacebookFromInstagram', 'saveFacebookSchedule', 'controlFacebookPosting', 'retryFacebookPost', 'resolveFacebookUncertain', 'refreshFacebookInsights');
 contextBridge.exposeInMainWorld('studio', Object.fromEntries(methods.map(method => [method, async payload => {
   const result = await ipcRenderer.invoke(`studio:${method}`, payload);
   if (!result.ok) throw new Error(result.error);

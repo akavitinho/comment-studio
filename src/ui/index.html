@@ -10,6 +10,7 @@
   <script src="proxy-format.js" defer></script>
   <script src="dashboard-analytics.js" defer></script>
   <script src="postings.js" defer></script>
+  <script src="facebook.js" defer></script>
   <script src="app.js" defer></script>
   <script src="dashboard-view.js" defer></script>
   <script src="official-insights-view.js" defer></script>
@@ -39,6 +40,7 @@
       <div class="nav-group" data-platform="tiktok"><button class="nav-group-title" type="button" aria-label="Selecionar TikTok"><span class="nav-group-glyph" aria-hidden="true"><img src="icons/tiktok.svg" alt=""></span><span class="nav-group-label">TikTok</span></button></div>
       <div class="nav-group" data-platform="x"><button class="nav-group-title" type="button" aria-label="Selecionar Twitter (X)"><span class="nav-group-glyph" aria-hidden="true"><img src="icons/x.svg" alt=""></span><span class="nav-group-label">Twitter (X)</span></button></div>
       <div class="nav-group" data-platform="instagram"><button class="nav-group-title" type="button" aria-label="Selecionar Instagram"><span class="nav-group-glyph" aria-hidden="true"><img src="icons/instagram.svg" alt=""></span><span class="nav-group-label">Instagram</span></button></div>
+      <div class="nav-group" data-platform="facebook"><button class="nav-group-title" type="button" aria-label="Selecionar Facebook"><span class="nav-group-glyph" aria-hidden="true"><img src="icons/facebook.svg" alt=""></span><span class="nav-group-label">Facebook</span></button></div>
       <div class="nav-general">
         <p class="nav-general-title">Geral</p>
         <button class="nav-item active" data-page="dashboard" aria-label="Dashboard" aria-current="page" title="Dashboard"><svg class="nav-icon" aria-hidden="true"><use href="#icon-dashboard"/></svg><span class="nav-label">Dashboard</span></button>
@@ -195,6 +197,24 @@
         <form id="meta-settings-form" class="media-card posting-meta-settings"><div class="section-heading"><h2>Login direto do Instagram</h2><p>Primeiro salve o projeto Supabase ao lado. O ID do aplicativo aparece automaticamente quando você conectar uma conta Instagram; o App Secret fica somente no Supabase.</p></div><div class="field-row"><label>ID do aplicativo Instagram<input name="appId" inputmode="numeric" readonly placeholder="Automático após conectar"></label><label>Versão da Graph API<input name="graphVersion" value="v23.0" required></label></div><label>URL de retorno HTTPS<input name="redirectUri" type="url" readonly placeholder="Gerada após salvar o Storage" required></label><div class="media-actions"><button type="submit" class="primary">Salvar configuração Meta</button></div></form>
         <form id="posting-storage-form" class="media-card posting-meta-settings"><div class="section-heading"><h2>1. Vídeos temporários no Supabase</h2><p>Informe a URL do projeto e a chave pública <code>sb_publishable_...</code>. Use um bucket privado chamado posting-videos, ative login anônimo e aplique a migração incluída no projeto.</p></div><label>URL do projeto<input name="url" type="url" required placeholder="https://projeto.supabase.co"></label><label>Chave pública<input name="publishableKey" required placeholder="sb_publishable_..."></label><div class="media-actions"><button type="submit" class="primary">Salvar Storage</button></div></form>
         </div>
+      </section>
+      <section data-panel="facebook-dashboard" hidden>
+        <div class="page-heading"><div><h1>Dashboard Facebook</h1><p>Métricas oficiais das Páginas e estado das filas.</p></div><button type="button" id="facebook-refresh" class="secondary">Atualizar métricas</button></div>
+        <p id="facebook-dashboard-feedback" class="posting-feedback" role="status"></p>
+        <div id="facebook-dashboard-metrics" class="posting-overview-grid"></div>
+        <div id="facebook-dashboard-pages" class="posting-accounts"></div>
+      </section>
+      <section data-panel="facebook-postings" hidden>
+        <div class="page-heading"><div><h1>Postagens Facebook</h1><p>Reels, fotos e textos em filas próprias por Página.</p></div><button type="button" id="facebook-connect" class="primary">Conectar Páginas</button></div>
+        <p id="facebook-feedback" class="posting-feedback" role="alert" hidden></p>
+        <label>Conexão para novo login<select id="facebook-login-proxy"><option value="">Direta</option></select></label>
+        <form id="facebook-storage-form" class="media-card"><h2>Conexão Supabase</h2><p id="facebook-storage-status">Configure o projeto Supabase para conectar Páginas e publicar Reels.</p><label>URL do projeto<input name="url" type="url" required placeholder="https://projeto.supabase.co"></label><label>Chave pública<input name="publishableKey" required placeholder="sb_publishable_..."></label><button type="submit" class="primary">Salvar conexão</button></form>
+        <section id="facebook-page-choice" class="media-card" hidden><h2>Escolha as Páginas</h2><div id="facebook-page-options"></div><button type="button" id="facebook-bind" class="primary">Adicionar Páginas selecionadas</button></section>
+        <div class="facebook-layout">
+          <form id="facebook-compose" class="media-card"><h2>Adicionar à fila</h2><label>Página<select name="accountId" required></select></label><label>Tipo<select name="type"><option value="reel">Reel</option><option value="photo">Foto</option><option value="text">Texto</option></select></label><div id="facebook-file-row"><span id="facebook-file-name">Nenhum arquivo selecionado</span><button type="button" id="facebook-pick-file" class="secondary">Escolher arquivo</button></div><label>Texto ou legenda<textarea name="caption" rows="4" maxlength="5000"></textarea></label><button type="submit" class="primary">Adicionar à fila</button></form>
+          <form id="facebook-schedule" class="media-card"><h2>Horários da Página</h2><label>Página<select name="accountId" required></select></label><label>Horários diários, separados por vírgula<input name="times" placeholder="16:00, 19:00" required></label><label>Variação em minutos<input name="variationMinutes" type="number" min="0" max="1439" value="0" required></label><label>Fuso horário<input name="timeZone" value="America/Sao_Paulo" required></label><button type="submit" class="primary">Salvar horários</button></form>
+        </div>
+        <div id="facebook-queues" class="posting-accounts"></div>
       </section>
       <section data-panel="media" hidden>
         <div class="page-heading"><div><h1>Preparar mídia</h1><p>Padronize capas e remova metadados de vídeos e imagens antes da publicação.</p></div><span class="badge">Processamento local</span></div>

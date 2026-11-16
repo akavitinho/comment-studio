@@ -428,3 +428,6 @@ verify_jwt = false
 
 [functions.instagram-exchange]
 verify_jwt = false
+
+[functions.facebook-exchange]
+verify_jwt = false

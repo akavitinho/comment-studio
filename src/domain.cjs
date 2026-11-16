@@ -48,7 +48,7 @@ function account(input, proxies) {
   const proxyId = input.proxyId || null;
   if (proxyId && !proxies.some(p => p.id === proxyId)) throw new Error('Proxy não encontrado.');
   const platform = input.platform || 'tiktok';
-  if (!['tiktok', 'instagram', 'x'].includes(platform)) throw new Error('Plataforma inválida.');
+  if (!['tiktok', 'instagram', 'facebook', 'x'].includes(platform)) throw new Error('Plataforma inválida.');
   const id = randomUUID();
   const requestedName = String(input.name || '').trim();
   const handle = String(input.handle || '').trim().replace(/^@/, '').slice(0, 80);
@@ -60,7 +60,7 @@ function accountChanges(input, proxies) {
   const proxyId = input.proxyId || null;
   if (proxyId && !proxies.some(p => p.id === proxyId)) throw new Error('Proxy não encontrado.');
   const platform = input.platform || 'tiktok';
-  if (!['tiktok', 'instagram', 'x'].includes(platform)) throw new Error('Plataforma inválida.');
+  if (!['tiktok', 'instagram', 'facebook', 'x'].includes(platform)) throw new Error('Plataforma inválida.');
   return { platform, name: text(input.name, 'Nome da conta'), handle: String(input.handle || '').trim().replace(/^@/, '').slice(0, 80), proxyId, ...(Object.hasOwn(input, 'tags') ? { tags: accountTags(input.tags) } : {}) };
 }
 function applyInstagramIdentity(account, username) {

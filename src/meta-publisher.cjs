@@ -117,6 +117,25 @@ class MetaPublisher {
     const permalink = await this.facebookPermalink(publishedId, pageToken);
     return { videoId: publishedId, permalink };
   }
+  async publishFacebookText(pageId, pageToken, message) {
+    const data = await this.callFacebook('POST', `${pageId}/feed`, pageToken, { message });
+    if (!data.id) throw new Error('O Facebook não confirmou a postagem de texto.');
+    return { id: data.id, permalink: await this.facebookPostPermalink(data.id, pageToken) };
+  }
+  async publishFacebookPhoto(pageId, pageToken, source, caption) {
+    const form = new FormData();
+    form.set('source', new Blob([source.bytes], { type: source.mime }), source.name);
+    form.set('caption', caption);
+    const url = new URL(`https://graph.facebook.com/${this.version}/${pageId}/photos`);
+    const response = await this.fetch(url, { method: 'POST', headers: { Authorization: `Bearer ${pageToken}` }, body: form });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || data.error || !data.id) throw new Error(`O Facebook não confirmou a foto${data.error?.code ? ` (código ${data.error.code})` : ''}.`);
+    return { id: data.post_id || data.id, permalink: await this.facebookPostPermalink(data.post_id || data.id, pageToken) };
+  }
+  async facebookPostPermalink(id, pageToken) {
+    try { return (await this.callFacebook('GET', id, pageToken, { fields: 'permalink_url' })).permalink_url || `https://www.facebook.com/${id}`; }
+    catch { return `https://www.facebook.com/${id}`; }
+  }
   async insights(mediaId, token) {
     const data = await this.call('GET', `${mediaId}/insights`, token, { metric: 'views,reach' });
     const result = { views: null, reach: null };

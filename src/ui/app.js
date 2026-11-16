@@ -44,7 +44,9 @@ function renderTargetTags() {
 let state = { accounts: [], proxies: [], campaign: null, events: [] };
 let campaignDirty = false;
 let currentPage = 'dashboard';
-let activePlatform = ['instagram', 'tiktok', 'x'].includes(localStorage.getItem('comment-studio-active-platform')) ? localStorage.getItem('comment-studio-active-platform') : 'instagram';
+let activePlatform = ['instagram', 'tiktok', 'x', 'facebook'].includes(localStorage.getItem('comment-studio-active-platform')) ? localStorage.getItem('comment-studio-active-platform') : 'instagram';
+for (const selector of ['#dashboard-platform', '#account-platform-filter', '#bulk-platform']) if (!$(selector).querySelector('[value="facebook"]')) $(selector).append(new Option('Facebook', 'facebook'));
+$('#account-form [name=platform]').append(new Option('Facebook', 'facebook'));
 $('#dashboard-platform').value = activePlatform;
 let historyFilter = 'all';
 let historyPage = 1;
@@ -106,7 +108,7 @@ function updateGroupLabels() {
   $('#campaigns-unavailable-nav').hidden = activePlatform !== 'instagram';
 }
 function setActivePlatform(platform) {
-  if (!['instagram', 'tiktok', 'x'].includes(platform) || activePlatform === platform) return;
+  if (!['instagram', 'tiktok', 'x', 'facebook'].includes(platform) || activePlatform === platform) return;
   activePlatform = platform;
   localStorage.setItem('comment-studio-active-platform', platform);
   $('#dashboard-platform').value = platform; // Compatibility with the existing TikTok and X views.
@@ -130,7 +132,7 @@ function page(name) {
   if (name === 'x' && activePlatform !== 'x') setActivePlatform('x');
   currentPage = name;
   updateGroupLabels();
-  const unavailable = name === 'postings' && activePlatform !== 'instagram';
+  const unavailable = name === 'postings' && !['instagram', 'facebook'].includes(activePlatform);
   const postingPanel = $('[data-panel="postings"]');
   postingPanel.classList.toggle('unavailable', unavailable);
   let postingMessage = $('#postings-unavailable');
@@ -142,7 +144,8 @@ function page(name) {
     postingMessage.hidden = !unavailable;
     if (unavailable) postingMessage.replaceChildren(element('h1', '', `Postagens ${platformName(activePlatform)}`), element('p', '', `Postagens no ${platformName(activePlatform)} ainda não estão disponíveis.`));
   }
-  $$('[data-panel]').forEach(panel => { panel.hidden = panel.dataset.panel !== name; });
+  const panelName = activePlatform === 'facebook' && ['dashboard', 'postings'].includes(name) ? `facebook-${name}` : name;
+  $$('[data-panel]').forEach(panel => { panel.hidden = panel.dataset.panel !== panelName; });
   $$('[data-page]').forEach(button => { const active = button.dataset.page === name; button.classList.toggle('active', active); if (active) button.setAttribute('aria-current', 'page'); else button.removeAttribute('aria-current'); });
   $('#breadcrumb').textContent = name === 'dashboard' ? `Dashboard ${platformName(activePlatform)}` : name === 'postings' ? `Postagens ${platformName(activePlatform)}` : pageNames[name];
   $('#notice').hidden = true;
@@ -160,7 +163,7 @@ $('.brand').addEventListener('click', event => { event.preventDefault(); if (doc
 function empty(title, detail, symbol) { const node = element('div', 'empty-state'); node.append(element('span', 'empty-symbol', symbol), element('h2', '', title), element('p', '', detail)); return node; }
 function formatDate(value) { return new Date(value).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }); }
 function fileName(value) { return String(value || '').split(/[\\/]/).pop(); }
-function platformName(value) { return value === 'instagram' ? 'Instagram' : value === 'x' ? 'Twitter (X)' : 'TikTok'; }
+function platformName(value) { return value === 'instagram' ? 'Instagram' : value === 'facebook' ? 'Facebook' : value === 'x' ? 'Twitter (X)' : 'TikTok'; }
 function profileLabel(account) { return account.name && account.name !== account.handle ? account.name : account.handle ? `@${account.handle}` : account.name || 'Conta'; }
 function proxyTitle(proxy) {
   const linked = state.accounts.filter(account => account.proxyId === proxy.id && (account.platform || 'tiktok') === activePlatform);
@@ -200,7 +203,7 @@ function accountTagGroup(account) {
   return group;
 }
 function platformIcon(value) {
-  const platform = ['instagram', 'x'].includes(value) ? value : 'tiktok';
+  const platform = ['instagram', 'facebook', 'x'].includes(value) ? value : 'tiktok';
   const icon = element('span', `platform-icon platform-${platform}`);
   const image = element('img'); image.src = `icons/${platform}.svg`; image.alt = '';
   icon.append(image);
@@ -491,7 +494,7 @@ $('#account-time-zone').addEventListener('input', () => {
   accountScheduleTouched = true; accountScheduleError();
   $('#account-time-zone-summary').textContent = `Fuso horário: ${$('#account-time-zone').value}`;
 });
-$('#open-account-form').addEventListener('click', () => { resetAccountForm(); $('#account-dialog').showModal(); accountForm.elements.name.focus(); });
+$('#open-account-form').addEventListener('click', () => { if (activePlatform === 'facebook') { page('postings'); return; } resetAccountForm(); $('#account-dialog').showModal(); accountForm.elements.name.focus(); });
 $('#account-dialog-close').addEventListener('click', resetAccountForm);
 $('#account-dialog').addEventListener('close', () => { if (accountForm.elements.id.value) resetAccountForm(); });
 function editAccount(account) {
@@ -685,6 +688,7 @@ function proxyCard(proxy, expanded) {
 function render() {
   window.renderX?.(state);
   window.renderPostings?.(state);
+  window.renderFacebook?.(state);
   $('#account-count').textContent = state.accounts.filter(account => (account.platform || 'tiktok') === activePlatform).length;
   $('#workspace-account-count').textContent = state.accounts.filter(account => (account.platform || 'tiktok') === activePlatform).length;
   const selected = new Set($$('input[name=accountIds]:checked').map(input => input.value));
@@ -771,7 +775,7 @@ function renderAccounts() {
   const expanded = new Set([...list.querySelectorAll('.account-card:has(.account-details[open])')].map(card => card.dataset.accountId));
   list.replaceChildren();
   if (!visible.length) { list.append(empty(platformAccounts.length ? 'Nenhuma conta encontrada' : 'Nenhuma conta cadastrada', platformAccounts.length ? 'Ajuste a busca ou os filtros.' : 'Adicione uma conta para começar.', '◎')); return; }
-  const groups = sort === 'platform' || metric ? ['instagram', 'tiktok', 'x'] : ['tiktok', 'instagram', 'x'];
+  const groups = sort === 'platform' || metric ? ['instagram', 'facebook', 'tiktok', 'x'] : ['tiktok', 'instagram', 'facebook', 'x'];
   for (const platform of groups) {
     const accounts = visible.filter(account => (account.platform || 'tiktok') === platform);
     if (!accounts.length) continue;
@@ -815,7 +819,7 @@ function accountCard(account, expanded, metric = null) {
   const menuContent = element('div', 'account-more-menu');
   const addAction = (label, fn, danger = false) => { const button = actionButton(label, fn, danger ? 'account-menu-danger' : ''); button.addEventListener('click', () => { menu.open = false; }); menuContent.append(button); };
   addAction(account.browserOpen ? 'Focar navegador' : 'Abrir navegador livre', () => window.studio.openAccountBrowser(account.id));
-  addAction(account.open ? 'Focar janela da automação' : `Abrir ${platform} para automação`, () => window.studio.openAccount(account.id));
+  if (platformId !== 'facebook') addAction(account.open ? 'Focar janela da automação' : `Abrir ${platform} para automação`, () => window.studio.openAccount(account.id));
   if (account.open) addAction('Fechar janela da automação', () => window.studio.closeAccount(account.id));
   if (account.browserOpen) addAction('Fechar navegador livre', () => window.studio.closeAccountBrowser(account.id));
   addAction('Testar conexão', () => window.studio.testConnection(account.id));
@@ -823,6 +827,10 @@ function accountCard(account, expanded, metric = null) {
   if (platformId === 'instagram') {
     addAction(account.meta?.connected || account.meta?.needsReconnect ? 'Reconectar Instagram' : 'Conectar Instagram', () => window.studio.connectMeta(account.id));
     if (account.meta?.connected || account.meta?.needsReconnect) addAction('Desconectar Instagram', () => window.studio.disconnectMeta(account.id));
+  }
+  if (platformId === 'facebook') {
+    addAction('Abrir postagens da Página', () => { page('postings'); return Promise.resolve(); });
+    if (account.facebook?.connected) addAction('Desconectar Página', () => window.studio.disconnectFacebook(account.id));
   }
   if (platformId === 'tiktok') {
     addAction(account.tiktokAnalytics?.connected || account.tiktokAnalytics?.needsReconnect ? 'Reconectar métricas TikTok' : 'Conectar métricas TikTok', () => window.studio.connectTikTokAnalytics(account.id));
@@ -868,6 +876,7 @@ function accountCard(account, expanded, metric = null) {
   content.append(element('p', '', `Sessão: ${account.browserProfile === 'proxy' ? 'compartilhada com o navegador desta proxy' : 'própria desta conta'}. Janela da automação ${account.open ? 'aberta' : 'fechada'}; navegador livre ${account.browserOpen ? 'aberto' : 'fechado'}.`));
   if (proxyBrowserOwner && account.browserProfile !== 'proxy') content.append(element('p', '', `Outra conta usa o navegador da proxy; o login de ${profileLabel(account)} permanece separado.`));
   if (platformId === 'instagram') content.append(element('p', '', `Meta: ${account.meta?.needsReconnect ? 'reconexão necessária' : account.meta?.connected ? `autorizada para @${account.meta.username || account.meta.igId}` : 'não autorizada'}. Insights ${account.meta?.insightsGranted ? 'autorizados' : 'não autorizados'}.`));
+  else if (platformId === 'facebook') content.append(element('p', '', `Página Facebook: ${account.facebook?.connected ? 'conectada' : 'reconexão necessária'}. Métricas ${account.facebook?.insightsGranted ? 'autorizadas' : 'indisponíveis'}.`));
   else if (platformId === 'tiktok') content.append(element('p', '', `Métricas TikTok: ${account.tiktokAnalytics?.needsReconnect ? 'reconexão necessária' : account.tiktokAnalytics?.connected ? `autorizadas para @${account.tiktokAnalytics.username || account.tiktokAnalytics.openId}` : 'não autorizadas'}. O login da automação é independente.`));
   else content.append(element('p', '', 'O aplicativo não confirma o login desta plataforma pela janela aberta.'));
   if (account.diagnostic) { content.append(element('p', 'diagnostic', `Último teste: IP ${account.diagnostic.ip} · ${account.diagnostic.durationMs} ms · ${formatLocation(account.diagnostic.location)} · ${formatDate(account.diagnostic.at)}`)); const source = attribution(account.diagnostic.location); if (source) content.append(source); }
@@ -1318,7 +1327,7 @@ function renderHistory() {
   const accountIds = new Set(state.accounts.map(account => account.id));
   const postingAttempts = new Map();
   for (const attempt of state.postings?.attempts || []) if (!postingAttempts.has(attempt.item_id)) postingAttempts.set(attempt.item_id, attempt.at);
-  const postingEntries = (activePlatform === 'instagram' ? state.postings?.items || [] : []).filter(item => ['published', 'cancelled'].includes(item.status) || !accountIds.has(item.account_id)).map(item => ({
+  const postingEntries = (['instagram', 'facebook'].includes(activePlatform) ? state.postings?.items || [] : []).filter(item => state.accounts.find(account => account.id === item.account_id)?.platform === activePlatform && (['published', 'cancelled'].includes(item.status) || !accountIds.has(item.account_id))).map(item => ({
     type: 'postings', item, at: item.status === 'published' ? item.published_at || item.created_at : postingAttempts.get(item.id) || item.created_at
   }));
   const entries = [
@@ -1351,10 +1360,11 @@ function renderHistory() {
       const accountName = item.account_name || (account ? profileLabel(account) : 'Conta removida');
       const filename = item.file.split(/[\\/]/).pop();
       const statusLabel = { published: 'Publicado', cancelled: 'Cancelado', attention: 'Precisa de atenção', uncertain: 'Resultado incerto', queued: 'Cancelado com a conta' }[item.status] || item.status;
-      body.append(element('span', 'history-kind', `Postagem · Instagram${item.queue_kind === 'shared' ? ' · Antiga Fila única' : ''}`), element('strong', '', `${filename} · ${statusLabel}`), element('p', '', accountName));
+      body.append(element('span', 'history-kind', `Postagem · ${activePlatform === 'facebook' ? 'Facebook' : 'Instagram'}${item.queue_kind === 'shared' ? ' · Antiga Fila única' : ''}`), element('strong', '', `${item.content_type === 'text' ? 'Texto' : filename} · ${statusLabel}`), element('p', '', accountName));
       if (item.error) body.append(element('p', 'history-message', item.error));
       row.append(time, body);
-      if (item.status === 'published' && item.permalink) row.append(actionButton('Abrir Reel', () => window.studio.openPublishedReel(item.id)));
+      if (item.status === 'published' && activePlatform === 'facebook' && item.facebook_permalink) row.append(actionButton('Abrir no Facebook', () => window.studio.openPublishedFacebookReel(item.id)));
+      else if (item.status === 'published' && item.permalink) row.append(actionButton('Abrir Reel', () => window.studio.openPublishedReel(item.id)));
     } else {
       body.append(element('span', 'history-kind', 'Atividade'), element('strong', '', entry.item.message));
       row.append(time, body);

@@ -490,20 +490,13 @@
       fbBox.hidden = !fbCheck.checked;
 
       const fbPageIdLabel = make('label', undefined, 'posting-fb-field');
-      fbPageIdLabel.append(make('span', 'ID da Página do Facebook:'));
-      const fbPageIdInput = make('input');
-      fbPageIdInput.type = 'text';
-      fbPageIdInput.placeholder = 'Ex: 1049281048123';
-      fbPageIdInput.value = media.facebook_page_id || '';
-      fbPageIdLabel.append(fbPageIdInput);
-
-      const fbTokenLabel = make('label', undefined, 'posting-fb-field');
-      fbTokenLabel.append(make('span', 'Token de Acesso da Página (Page Access Token):'));
-      const fbTokenInput = make('input');
-      fbTokenInput.type = 'password';
-      fbTokenInput.placeholder = 'EAA...';
-      fbTokenInput.value = media.facebook_page_token || '';
-      fbTokenLabel.append(fbTokenInput);
+      fbPageIdLabel.append(make('span', 'Página conectada:'));
+      const fbPageSelect = make('select');
+      const connectedPages = state.accounts.filter(page => page.platform === 'facebook' && page.facebook?.connected);
+      fbPageSelect.append(new Option('Selecione uma Página', ''));
+      for (const page of connectedPages) fbPageSelect.append(new Option(page.name, page.facebookPageId));
+      fbPageSelect.value = media.facebook_page_id || '';
+      fbPageIdLabel.append(fbPageSelect);
 
       const fbSaveBtn = button('Salvar configuração Facebook', async () => {
         fbSaveBtn.disabled = true;
@@ -511,8 +504,7 @@
           const next = await window.studio.savePostingMediaSettings({
             accountId: account.id,
             crossPostFacebook: fbCheck.checked,
-            facebookPageId: fbPageIdInput.value,
-            facebookPageToken: fbTokenInput.value
+            facebookPageId: fbPageSelect.value
           });
           clearError();
           if (window.applyStudioState) window.applyStudioState(next); else window.renderPostings(next);
@@ -527,7 +519,7 @@
         }
       });
 
-      fbBox.append(fbPageIdLabel, fbTokenLabel, fbSaveBtn, make('small', 'Ao publicar no Instagram, o mesmo vídeo será enviado automaticamente como Reel para a Página do Facebook.', 'posting-media-path'));
+      fbBox.append(fbPageIdLabel, fbSaveBtn, make('small', 'O Reel publicado no Instagram entra na fila própria da Página Facebook selecionada.', 'posting-media-path'));
       fbCross.append(fbTitle, fbToggleRow, fbBox);
       mediaSection.append(fbCross);
 
@@ -647,6 +639,12 @@
         if (item.queue_kind === 'shared') identity.append(make('small', 'Da antiga Fila única', 'help'));
         heading.append(identity);
         const actions = make('div', undefined, 'posting-item-quick-actions');
+        const availablePages = state.accounts.filter(page => page.platform === 'facebook' && page.facebook?.connected);
+        if (availablePages.length && item.file) {
+          const destination = make('select');
+          for (const page of availablePages) destination.append(new Option(page.name, page.id));
+          actions.append(destination, button('Postar no Facebook', () => window.studio.queueFacebookFromInstagram({ itemId: item.id, accountId: destination.value })));
+        }
         if (item.permalink) actions.append(button('Abrir Reel', () => window.studio.openPublishedReel(item.id)));
         if (item.facebook_permalink) actions.append(button('Abrir Facebook', () => window.studio.openPublishedFacebookReel(item.id)));
         if (item.facebook_error) actions.append(make('small', `Facebook: ${item.facebook_error}`, 'posting-media-feedback'));

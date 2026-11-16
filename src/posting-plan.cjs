@@ -78,6 +78,7 @@ class PostingPlan {
       CREATE TABLE IF NOT EXISTS media_insight_history (id INTEGER PRIMARY KEY AUTOINCREMENT, item_id TEXT NOT NULL, media_id TEXT NOT NULL, views INTEGER, reach INTEGER, fetched_at TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS media_insight_history_item_time ON media_insight_history(item_id, fetched_at);
       CREATE TABLE IF NOT EXISTS storage_objects (path TEXT PRIMARY KEY, item_id TEXT NOT NULL, account_id TEXT NOT NULL, uploaded_at TEXT NOT NULL);`);
+    this.db.exec('CREATE TABLE IF NOT EXISTS facebook_page_insights (account_id TEXT PRIMARY KEY, media_views INTEGER, unique_viewers INTEGER, fetched_at TEXT NOT NULL)');
     this.db.exec("CREATE TABLE IF NOT EXISTS posting_media_settings (account_id TEXT PRIMARY KEY, folder TEXT, cover TEXT, video_order TEXT NOT NULL DEFAULT 'sequence', cross_post_facebook INTEGER NOT NULL DEFAULT 0, facebook_page_id TEXT, facebook_page_token TEXT)");
     const mediaCols = new Set(this.db.prepare('PRAGMA table_info(posting_media_settings)').all().map(row => row.name));
     if (!mediaCols.has('video_order')) this.db.exec("ALTER TABLE posting_media_settings ADD COLUMN video_order TEXT NOT NULL DEFAULT 'sequence'");
@@ -94,6 +95,8 @@ class PostingPlan {
     if (!columns.has('scheduled_at')) this.db.exec('ALTER TABLE items ADD COLUMN scheduled_at TEXT');
     if (!columns.has('facebook_permalink')) this.db.exec('ALTER TABLE items ADD COLUMN facebook_permalink TEXT');
     if (!columns.has('facebook_error')) this.db.exec('ALTER TABLE items ADD COLUMN facebook_error TEXT');
+    if (!columns.has('content_type')) this.db.exec("ALTER TABLE items ADD COLUMN content_type TEXT NOT NULL DEFAULT 'reel'");
+    if (!columns.has('source_item_id')) this.db.exec('ALTER TABLE items ADD COLUMN source_item_id TEXT');
     this.db.exec('CREATE INDEX IF NOT EXISTS items_shared_agenda ON items(queue_kind,scheduled_at,account_id,status)');
     this.db.exec(`CREATE TABLE IF NOT EXISTS fixed_posting_slots (account_id TEXT NOT NULL, local_date TEXT NOT NULL, minute INTEGER NOT NULL, planned_at TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', PRIMARY KEY(account_id,local_date,minute));
       CREATE TABLE IF NOT EXISTS removed_shared_files (account_id TEXT NOT NULL, filename TEXT NOT NULL, PRIMARY KEY(account_id,filename));`);
@@ -119,7 +122,7 @@ class PostingPlan {
     for (const row of this.db.prepare("SELECT account_id,config FROM schedules WHERE json_extract(config,'$.mode')='fixed'").all()) this.scheduleFixed(row.account_id, new Date(), { preserve: true });
   }
   snapshot() {
-    return { schedules: this.db.prepare('SELECT * FROM schedules').all().map(row => ({ ...row, config: JSON.parse(row.config) })), mediaSettings: this.db.prepare('SELECT * FROM posting_media_settings').all(), items: this.db.prepare('SELECT * FROM items ORDER BY account_id, position, created_at').all(), attempts: this.db.prepare('SELECT * FROM attempts ORDER BY at DESC LIMIT 100').all(), insights: this.db.prepare('SELECT * FROM media_insights').all(), insightHistory: this.db.prepare('SELECT item_id,media_id,views,reach,fetched_at FROM media_insight_history ORDER BY fetched_at').all() };
+    return { schedules: this.db.prepare('SELECT * FROM schedules').all().map(row => ({ ...row, config: JSON.parse(row.config) })), mediaSettings: this.db.prepare('SELECT account_id,folder,cover,video_order,cross_post_facebook,facebook_page_id FROM posting_media_settings').all(), items: this.db.prepare('SELECT * FROM items ORDER BY account_id, position, created_at').all(), attempts: this.db.prepare('SELECT * FROM attempts ORDER BY at DESC LIMIT 100').all(), insights: this.db.prepare('SELECT * FROM media_insights').all(), insightHistory: this.db.prepare('SELECT item_id,media_id,views,reach,fetched_at FROM media_insight_history ORDER BY fetched_at').all() };
   }
   mediaSettings(accountId) {
     return this.db.prepare('SELECT folder,cover,video_order,cross_post_facebook,facebook_page_id,facebook_page_token FROM posting_media_settings WHERE account_id=?').get(accountId) || { folder: null, cover: null, video_order: 'sequence', cross_post_facebook: 0, facebook_page_id: null, facebook_page_token: null };
@@ -340,6 +343,15 @@ class PostingPlan {
     if (existing.some(item => path.basename(item.file).toLocaleLowerCase('pt-BR') === name)) throw new Error(`O vídeo ${path.basename(file)} já foi adicionado a esta conta. Escolha outro arquivo.`);
     const position = this.db.prepare('SELECT COALESCE(MAX(position),0)+1 AS n FROM items WHERE account_id=?').get(accountId).n;
     this.db.prepare('INSERT INTO items (id,account_id,account_name,file,caption,position,created_at) VALUES (?,?,?,?,?,?,?)').run(randomUUID(), accountId, String(accountName).slice(0, 120), file, caption, position, new Date().toISOString());
+    return this.snapshot();
+  }
+  addFacebook(accountId, { type, file = '', caption = '', sourceItemId = null }, accountName = '') {
+    if (!['reel', 'photo', 'text'].includes(type)) throw new Error('Tipo de postagem Facebook inválido.');
+    if (typeof caption !== 'string' || (type === 'text' && !caption.trim()) || caption.length > 5000) throw new Error('Escreva um texto ou legenda de até 5.000 caracteres.');
+    if (type !== 'text' && (!path.isAbsolute(file) || !fs.existsSync(file) || !fs.statSync(file).isFile() || !(type === 'reel' ? /\.(mp4|mov)$/i : /\.(jpe?g|png)$/i).test(file))) throw new Error(type === 'reel' ? 'Selecione um vídeo MP4 ou MOV.' : 'Selecione uma imagem JPG ou PNG.');
+    if (sourceItemId && this.db.prepare("SELECT 1 FROM items WHERE account_id=? AND source_item_id=? AND status<>'cancelled'").get(accountId, sourceItemId)) return this.snapshot();
+    const position = this.db.prepare('SELECT COALESCE(MAX(position),0)+1 AS n FROM items WHERE account_id=?').get(accountId).n;
+    this.db.prepare('INSERT INTO items (id,account_id,account_name,file,caption,position,created_at,content_type,source_item_id) VALUES (?,?,?,?,?,?,?,?,?)').run(randomUUID(), accountId, String(accountName).slice(0,120), file, caption, position, new Date().toISOString(), type, sourceItemId);
     return this.snapshot();
   }
   updateItem(id, changes) {

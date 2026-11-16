@@ -1027,3 +1027,10 @@ html[data-theme="dark"] .proxy-toolbar { background: transparent; border: 0; box
   .posting-media-source-row { align-items: stretch; flex-direction: column; }
   .posting-media-source-row button { align-self: flex-start; }
 }
+.facebook-layout { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr)); gap: 16px; margin: 20px 0; }
+.facebook-layout .media-card, .facebook-page-card { display: grid; gap: 12px; }
+.facebook-layout label { display: grid; gap: 6px; }
+#facebook-page-options { display: grid; gap: 8px; margin: 12px 0; }
+#facebook-file-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+#facebook-dashboard-metrics .media-card { display: flex; flex-direction: column; gap: 4px; }
+#facebook-queues, #facebook-dashboard-pages { display: grid; gap: 16px; margin-top: 18px; }
