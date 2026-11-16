@@ -24,7 +24,7 @@ test('search never clicks the next arrow while a comment draft exists', async ()
   const { automation, store } = fixture(true);
   const win = automation.getWindow();
   win.webContents.getURL = () => 'https://www.tiktok.com/@previous/video/111';
-  automation.evaluate = async (_win, fn) => fn.name === 'inspectAnyDraft' ? true : assert.fail(`unexpected ${fn.name}`);
+  automation.evaluate = async (_win, fn) => fn.name === 'inspectChallenge' ? { detected: false } : fn.name === 'inspectAnyDraft' ? true : assert.fail(`unexpected ${fn.name}`);
   await assert.rejects(automation.openSearchVideo(win, { ...campaign, targetType: 'search' }, store.data.accounts[0], video), /rascunho/);
 });
 test('search rejects unrelated arrow destination and opens the collected card instead', async () => {
@@ -418,6 +418,17 @@ test('human verification focuses the account and resumes only after it disappear
   assert.equal(focused, 1);
   assert.match(messages[0], /Verificação humana/);
   assert.match(messages[1], /Verificação concluída/);
+});
+test('a TikTok CAPTCHA keeps the browser open when a page operation times out', async () => {
+  const { automation } = fixture(true);
+  let destroyed = false;
+  const win = {
+    isDestroyed: () => destroyed,
+    destroy: () => { destroyed = true; },
+    webContents: { executeJavaScript: async () => ({ detected: true }) }
+  };
+  await assert.rejects(automation.bounded(win, 'navegação', 1, () => new Promise(() => {})), error => error.challengePending === true);
+  assert.equal(destroyed, false);
 });
 test('Para você publishes and confirms the prepared comment automatically', async () => {
   const { automation, store } = fixture(true);

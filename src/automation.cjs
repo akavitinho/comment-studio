@@ -192,6 +192,7 @@ function inspectSkippableContent() {
   return { skip: isLive || isAd, reason: isLive ? 'live' : isAd ? 'advertisement' : null };
 }
 function inspectChallenge() {
+  const challengePath = /\/(?:captcha|challenge|verify)(?:\/|$)/i.test(location.pathname);
   const visible = element => {
     if (!element) return false;
     const style = getComputedStyle(element);
@@ -210,9 +211,10 @@ function inspectChallenge() {
   const text = String(document.body?.innerText || '').toLocaleLowerCase().replace(/\s+/g, ' ');
   const instruction = [
     'arraste o controle deslizante', 'encaixar o quebra-cabeça', 'drag the slider',
-    'complete the puzzle', 'slide to fit', 'verificação de segurança', 'security verification'
+    'complete the puzzle', 'slide to fit', 'verificação de segurança', 'security verification',
+    'verify to continue', 'verify that you are human', 'drag the puzzle piece', 'arraste a peça'
   ].some(phrase => text.includes(phrase));
-  return { detected: container || frame || instruction, kind: instruction ? 'slider' : 'verification' };
+  return { detected: challengePath || container || frame || instruction, kind: instruction ? 'slider' : 'verification' };
 }
 function visiblePoint(selector) {
   const element = [...document.querySelectorAll(selector)].find(e => {
@@ -373,10 +375,22 @@ class Automation {
     if (ctx) { ctx.stage = stage; ctx.stageStartedAt = new Date().toISOString(); this.workerStatus(ctx, ctx.paused ? 'paused' : 'running'); }
     const label = ctx ? this.store.data.accounts.find(a => a.id === ctx.id)?.name || ctx.id : 'Verificação';
     this.store.log(`Etapa iniciada: ${label} · ${stage} · vídeo ${ctx?.state?.pending?.videoId || '—'}.`);
-    let timer;
+    let timer, settled = false;
     try {
       const result = await Promise.race([Promise.resolve().then(operation), new Promise((_, reject) => {
-        timer = setTimeout(() => {
+        timer = setTimeout(async () => {
+          let challenge = false;
+          try {
+            if (!win.isDestroyed()) challenge = await Promise.race([
+              win.webContents.executeJavaScript(`(${inspectChallenge.toString()})()`).then(result => Boolean(result?.detected)),
+              pause(4000).then(() => false)
+            ]);
+          } catch {}
+          if (settled) return;
+          if (challenge) {
+            reject(Object.assign(new Error('Verificação humana aberta na janela.'), { challengePending: true }));
+            return;
+          }
           if (ctx) { ctx.generation++; ctx.needsRecovery = true; }
           try { if (!win.isDestroyed()) win.destroy(); } catch {}
           reject(new Error(`Tempo excedido na etapa ${stage} (${ms / 1000}s).`));
@@ -385,7 +399,7 @@ class Automation {
       if (ctx && generation !== ctx.generation) throw new Error('Resposta de janela anterior descartada.');
       this.store.log(`Etapa concluída: ${label} · ${stage}.`);
       return result;
-    } finally { clearTimeout(timer); }
+    } finally { settled = true; clearTimeout(timer); }
   }
   update(patch) {
     Object.assign(this.current, patch);
@@ -518,16 +532,22 @@ class Automation {
   async load(win, url) {
     await this.checkpoint();
     if (!win || win.isDestroyed()) throw new Error('A janela da conta foi fechada.');
+    const account = this.store.data.accounts.find(item => item.id === this.execution.getStore()?.id);
+    if (account) await this.resolveChallenge(win, account);
     try { await this.bounded(win, 'navegação', 30000, () => win.loadURL(url)); }
     catch (error) {
+      if (error.challengePending) throw error;
       if (error.code !== -3 && !/ERR_ABORTED|\(-3\)/.test(String(error.message))) throw error;
       await this.wait(1200);
+      if (account) await this.resolveChallenge(win, account);
       if (win.webContents.getURL() !== url) await this.bounded(win, 'navegação', 30000, () => win.loadURL(url));
     }
+    if (account) await this.resolveChallenge(win, account);
     if (!win.webContents.getURL().startsWith('https://www.tiktok.com/')) throw new Error('O TikTok redirecionou a página. Abra a conta e confirme o login.');
     await this.wait(2200);
   }
   async discover(win, campaign, account, excluded = new Set(), targetIndex = 0) {
+    await this.resolveChallenge(win, account);
     const sourceURL = targetURL(campaign, targetIndex);
     if (campaign.targetType === 'search') await this.restoreSearch(win, campaign, targetIndex);
     else if (win.webContents.getURL() !== sourceURL) await this.load(win, sourceURL);
@@ -567,6 +587,7 @@ class Automation {
     await this.load(win, source);
   }
   async openSearchVideo(win, campaign, account, url, targetIndex = 0) {
+    await this.resolveChallenge(win, account);
     const expected = videoKey(url);
     if (videoKey(win.webContents.getURL()) === expected) return;
     if (videoKey(win.webContents.getURL())) {
@@ -850,6 +871,7 @@ class Automation {
       this.update({ message: `Contas trabalhando em paralelo · ${account.name}: buscando vídeos…`, accountName: account.name });
       if (!this.getWindow(accountId)) await this.openAccount(accountId, targetURL(campaign, workerState.targetIndex), { background: false });
       const win = this.getWindow(accountId);
+      await this.resolveChallenge(win, account);
       const forYou = campaign.targetType === 'foryou';
       const advance = async previousId => {
         if (workerState.feedRecovery) {
@@ -1126,6 +1148,17 @@ class Automation {
         return null;
       } catch (error) {
         if (this.stopRequested) throw error;
+        const challengeWindow = this.getWindow?.(accountId);
+        if (challengeWindow && !challengeWindow.isDestroyed()) {
+          try {
+            if (await this.resolveChallenge(challengeWindow, account)) {
+              this.store.log(`Verificação resolvida sem reabrir o navegador: ${account.name}.`);
+              continue;
+            }
+          } catch (challengeError) {
+            if (error.challengePending) throw challengeError;
+          }
+        }
         const pending = workerState.pending;
         if (ctx.needsRecovery) {
           ctx.needsRecovery = false;
