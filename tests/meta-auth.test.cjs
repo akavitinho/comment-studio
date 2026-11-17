@@ -79,6 +79,59 @@ test('login binds signed state to the account and exchanges code through the ser
   } finally { fs.rmSync(directory, { recursive: true, force: true }); }
 });
 
+test('external Instagram login accepts only the callback for the copied link', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'studio-meta-external-'));
+  const redirectUri = 'https://example.supabase.co/functions/v1/meta-callback';
+  const calls = [];
+  try {
+    const auth = new MetaAuth({ directory, safeStorage: {}, getConnection: async () => ({ ses: {} }), getStorageSettings: storage,
+      requestService: async (_connection, body) => {
+        calls.push(body);
+        if (body.action === 'start') return { provider: 'instagram', appId: '123456789012345', redirectUri, state: 'signed-external-state', expiresAt: new Date(Date.now() + 60_000).toISOString() };
+        return { accessToken: 'long-user-token', expiresIn: 5184000, permissions: ['instagram_business_basic', 'instagram_business_content_publish'] };
+      } });
+    auth.graph = async () => ({ user_id: '17841400000000001', username: 'creator', account_type: 'BUSINESS' });
+    const started = await auth.startExternal('account-a');
+    assert.equal(new URL(started.loginUrl).hostname, 'www.instagram.com');
+    assert.equal(new URL(started.loginUrl).searchParams.has('force_authentication'), false);
+    await assert.rejects(auth.completeExternal('account-a', `${redirectUri}?state=wrong&code=one-time-code`), /outro login/);
+    assert.equal(calls.length, 1);
+    const result = await auth.completeExternal('account-a', `${redirectUri}?state=signed-external-state&code=one-time-code`);
+    assert.equal(result.profile.username, 'creator');
+    assert.deepEqual(calls.map(call => call.action), ['start', 'exchange']);
+    await assert.rejects(auth.completeExternal('account-a', `${redirectUri}?state=signed-external-state&code=one-time-code`), /Gere primeiro/);
+  } finally { fs.rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('automatic Instagram login waits for Dolphin and exchanges without a pasted URL', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'studio-meta-automatic-'));
+  const calls = [];
+  let ready = false;
+  try {
+    const auth = new MetaAuth({ directory, safeStorage: {}, getStorageSettings: storage,
+      requestService: async (_connection, body) => {
+        calls.push(body);
+        if (body.action === 'start') return { provider: 'instagram', appId: '123456789012345', redirectUri: 'https://example.supabase.co/functions/v1/meta-callback', state: 'signed-automatic-state', expiresAt: new Date(Date.now() + 60_000).toISOString() };
+        if (body.action === 'status') return { status: ready ? 'ready' : 'pending' };
+        return { accessToken: 'long-user-token', expiresIn: 5184000, permissions: ['instagram_business_basic', 'instagram_business_content_publish'] };
+      } });
+    auth.graph = async () => ({ user_id: '17841400000000001', username: 'creator', account_type: 'BUSINESS' });
+    const connection = { ses: {} };
+    const started = await auth.startAutomatic('account-a', connection);
+    assert.equal(new URL(started.loginUrl).searchParams.get('state'), 'signed-automatic-state');
+    assert.equal(new URL(started.loginUrl).searchParams.has('force_authentication'), false);
+    assert.equal(calls[0].autoConnect, true);
+    assert.match(calls[0].pollSecret, /^[a-f0-9]{64}$/);
+    assert.equal((await auth.pollAutomatic('account-a')).status, 'pending');
+    ready = true;
+    const finished = await auth.pollAutomatic('account-a');
+    assert.equal(finished.result.profile.username, 'creator');
+    assert.deepEqual(calls.map(call => call.action), ['start', 'status', 'status', 'exchange_auto']);
+    assert.equal(calls[0].pollSecret, calls[3].pollSecret);
+    await assert.rejects(auth.pollAutomatic('account-a'), /não está mais ativo/);
+  } finally { fs.rmSync(directory, { recursive: true, force: true }); }
+});
+
 test('expired OAuth state closes login before opening Facebook', async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'studio-meta-expired-'));
   let closed = false, loaded = false;

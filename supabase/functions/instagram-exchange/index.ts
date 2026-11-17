@@ -10,6 +10,8 @@ const base64url = (bytes: Uint8Array) => btoa(String.fromCharCode(...bytes)).rep
 const decode = (value: string) => Uint8Array.from(atob(value.replace(/-/g, '+').replace(/_/g, '/') + '='.repeat((4 - value.length % 4) % 4)), c => c.charCodeAt(0));
 async function key(secret: string) { return crypto.subtle.importKey('raw', encoder.encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign', 'verify']); }
 async function hashState(state: string) { return Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', encoder.encode(state))), byte => byte.toString(16).padStart(2, '0')).join(''); }
+async function relayKey(secret: string) { const bytes = await crypto.subtle.digest('SHA-256', encoder.encode(`comment-studio:instagram-oauth-relay:${secret}`)); return crypto.subtle.importKey('raw', bytes, 'AES-GCM', false, ['decrypt']); }
+async function decryptCode(ciphertext: string, iv: string, secret: string) { return new TextDecoder().decode(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: decode(iv) }, await relayKey(secret), decode(ciphertext))); }
 function database() {
   const url = Deno.env.get('SUPABASE_URL');
   const secret = JSON.parse(Deno.env.get('SUPABASE_SECRET_KEYS') || '{}').default;
@@ -48,20 +50,24 @@ Deno.serve(async (request: Request) => {
   if (!/^[a-f0-9-]{16,64}$/i.test(accountId) || !/^[a-f0-9]{32,64}$/i.test(installId)) return reply(400, { error: 'Identidade local inválida.' });
   const hmac = await key(secret);
   if (body.action === 'start') {
+    const automatic = body.autoConnect === true;
+    const pollSecret = String(body.pollSecret || '');
+    if (automatic && !/^[a-f0-9]{64}$/.test(pollSecret)) return reply(400, { error: 'Segredo temporário do login inválido.' });
     const now = Math.floor(Date.now() / 1000);
-    const payload = { provider: 'instagram', appId, accountId, installId, nonce: crypto.randomUUID(), exp: now + 600 };
+    const payload = { provider: 'instagram', appId, accountId, installId, nonce: crypto.randomUUID(), exp: now + 600, ...(automatic ? { auto: true } : {}) };
     const encoded = base64url(encoder.encode(JSON.stringify(payload)));
     const signature = base64url(new Uint8Array(await crypto.subtle.sign('HMAC', hmac, encoder.encode(encoded))));
     const state = `${encoded}.${signature}`;
     try {
       const db = database();
       await db.from('meta_oauth_flows').delete().lt('expires_at', new Date().toISOString());
-      const { error } = await db.from('meta_oauth_flows').insert({ state_hash: await hashState(state), account_id: accountId, install_id: installId, expires_at: new Date(payload.exp * 1000).toISOString() });
+      const { error } = await db.from('meta_oauth_flows').insert({ state_hash: await hashState(state), account_id: accountId, install_id: installId, expires_at: new Date(payload.exp * 1000).toISOString(), ...(automatic ? { poll_secret_hash: await hashState(pollSecret) } : {}) });
       if (error) throw error;
     } catch { return reply(503, { error: 'Registro temporário do login indisponível. Tente novamente.' }); }
     return reply(200, { state, provider: 'instagram', appId, redirectUri: REDIRECT_URI, expiresAt: new Date(payload.exp * 1000).toISOString() });
   }
-  if (body.action !== 'exchange' || !/^[A-Za-z0-9_-]{8,4096}$/.test(String(body.code || ''))) return reply(400, { error: 'Código de autorização inválido.' });
+  if (!['exchange', 'status', 'exchange_auto'].includes(String(body.action))) return reply(400, { error: 'Ação de login inválida.' });
+  if (body.action === 'exchange' && !/^[A-Za-z0-9_-]{8,4096}$/.test(String(body.code || ''))) return reply(400, { error: 'Código de autorização inválido.' });
   let stage = 'validar estado';
   try {
     const [encoded, signature, extra] = String(body.state || '').split('.');
@@ -70,11 +76,26 @@ Deno.serve(async (request: Request) => {
     if (!valid) throw new Error('state');
     const state = JSON.parse(new TextDecoder().decode(decode(encoded)));
     if (state.provider !== 'instagram' || state.appId !== appId || state.accountId !== accountId || state.installId !== installId || !Number.isInteger(state.exp) || state.exp < Date.now() / 1000 || state.exp > Date.now() / 1000 + 600) throw new Error('state');
+    const automatic = body.action !== 'exchange';
+    if (automatic && state.auto !== true) throw new Error('state');
+    if (!automatic && state.auto === true) throw new Error('state');
+    const pollSecret = String(body.pollSecret || '');
+    if (automatic && !/^[a-f0-9]{64}$/.test(pollSecret)) throw new Error('state');
+    const stateHash = await hashState(String(body.state));
+    const pollHash = automatic ? await hashState(pollSecret) : null;
+    if (body.action === 'status') {
+      const { data, error } = await database().from('meta_oauth_flows').select('code_ciphertext,oauth_error').eq('state_hash', stateHash).eq('account_id', accountId).eq('install_id', installId).eq('poll_secret_hash', pollHash).gt('expires_at', new Date().toISOString()).maybeSingle();
+      if (error || !data) throw new Error('state');
+      return reply(200, { status: data.oauth_error ? 'cancelled' : data.code_ciphertext ? 'ready' : 'pending' });
+    }
     stage = 'consumir estado';
-    const { data, error } = await database().from('meta_oauth_flows').delete().eq('state_hash', await hashState(String(body.state))).eq('account_id', accountId).eq('install_id', installId).gt('expires_at', new Date().toISOString()).select('state_hash').maybeSingle();
+    let query = database().from('meta_oauth_flows').delete().eq('state_hash', stateHash).eq('account_id', accountId).eq('install_id', installId).gt('expires_at', new Date().toISOString());
+    if (automatic) query = query.eq('poll_secret_hash', pollHash).not('code_ciphertext', 'is', null);
+    const { data, error } = await query.select(automatic ? 'code_ciphertext,code_iv' : 'state_hash').maybeSingle();
     if (error || !data) throw new Error('state_used');
+    const code = automatic ? await decryptCode(data.code_ciphertext, data.code_iv, secret) : String(body.code);
     stage = 'trocar código';
-    const short = await graph(new URL('https://api.instagram.com/oauth/access_token'), new URLSearchParams({ client_id: appId!, client_secret: secret, grant_type: 'authorization_code', redirect_uri: REDIRECT_URI, code: String(body.code) }));
+    const short = await graph(new URL('https://api.instagram.com/oauth/access_token'), new URLSearchParams({ client_id: appId!, client_secret: secret, grant_type: 'authorization_code', redirect_uri: REDIRECT_URI, code }));
     const permissions = Array.isArray(short.permissions) ? short.permissions : typeof short.permissions === 'string' ? short.permissions.split(',').map((s: string) => s.trim()) : [];
     if (PERMISSIONS.some(permission => !permissions.includes(permission))) return reply(400, { error: 'O Instagram não concedeu acesso ao perfil e à publicação. Reconecte e autorize ambas as permissões.' });
     const second = new URL('https://graph.instagram.com/access_token');

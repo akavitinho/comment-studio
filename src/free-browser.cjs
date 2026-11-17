@@ -10,6 +10,7 @@ let hub = null;
 function destination(input) {
   const value = String(input || '').trim();
   if (!value) return 'https://www.google.com/';
+  if (value === 'about:blank') return value;
   if (/^audit(oria)?$/i.test(value) || value.toLowerCase() === 'fingerprint') return auditURL;
   if (value.length > 2048) throw new Error('Pesquisa ou endereço muito longo.');
   if (/^https:\/\//i.test(value)) {
@@ -94,12 +95,21 @@ function browserShortcut(current, event, input) {
   else if (command && key === 'r') { event.preventDefault(); site.reload(); }
   else if (input.alt && !input.control && key === 'left' && site.navigationHistory.canGoBack()) { event.preventDefault(); site.navigationHistory.goBack(); }
   else if (input.alt && !input.control && key === 'right' && site.navigationHistory.canGoForward()) { event.preventDefault(); site.navigationHistory.goForward(); }
+  else if (key === 'f12') { event.preventDefault(); site.toggleDevTools(); }
 }
 
 async function loadTab(current, tab, input) {
   tab.message = '';
-  try { await tab.view.webContents.loadURL(destination(input)); sendState(current); }
-  catch (error) { const code = String(error.message).match(/ERR_[A-Z_]+/)?.[0]; if (code === 'ERR_ABORTED') { sendState(current); return; } tab.message = `Não foi possível abrir a página (${code || 'conexão indisponível'}).`; sendState(current); }
+  try {
+    await tab.view.webContents.loadURL(destination(input));
+    sendState(current);
+    return true;
+  } catch (error) {
+    const code = String(error.message).match(/ERR_[A-Z_]+/)?.[0];
+    if (code !== 'ERR_ABORTED') tab.message = `Não foi possível abrir a página (${code || 'conexão indisponível'}).`;
+    sendState(current);
+    return false;
+  }
 }
 
 function createTab(current, group, { label, webPreferences, url, deferActivate = false } = {}) {
@@ -132,13 +142,13 @@ function createTab(current, group, { label, webPreferences, url, deferActivate =
   return tab;
 }
 
-function createHub(show) {
+function createHub(show, shared) {
   const win = new BrowserWindow({ width: 1140, height: 820, minWidth: 560, minHeight: 400,
     title: 'Navegador · Comment Studio', show, backgroundColor: '#f7f7f8',
     webPreferences: { preload: path.join(__dirname, 'free-browser-preload.cjs'), sandbox: true, contextIsolation: true, nodeIntegration: false }
   });
   const current = { win, tabs: [], activeId: '' };
-  hub = current;
+  if (shared) hub = current;
   win.setMenu(null);
   win.on('resize', () => resize(current));
   win.webContents.on('before-input-event', (event, input) => browserShortcut(current, event, input));
@@ -168,15 +178,21 @@ function createHub(show) {
   return current;
 }
 
-async function openFreeBrowser({ title, session, startURL, register, onClose, show = true, preload } = {}) {
-  const current = hub && !hub.win.isDestroyed() ? hub : createHub(show);
+async function openFreeBrowser({ title, session, startURL, register, onClose, show = true, preload, loadHome = true, newWindow = false } = {}) {
+  const current = !newWindow && hub && !hub.win.isDestroyed() ? hub : createHub(show, !newWindow);
   await current.ready;
   const group = { title, session, startURL, register, onClose, preload, tabs: new Set(), lastTabId: '', closed: false };
-  const tab = createTab(current, group, { label: title, url: startURL });
+  const tab = createTab(current, group, { label: title, url: loadHome ? startURL : undefined });
   const handle = {
     get window() { return current.win; },
     get site() { return current.tabs.find(item => item.id === group.lastTabId)?.view.webContents; },
     get view() { return current.tabs.find(item => item.id === group.lastTabId)?.view; },
+    async loadInitialPage(url) {
+      if (tab.closed) throw new Error('A aba foi fechada antes de concluir a abertura.');
+      if (!(await loadTab(current, tab, url))) throw new Error('Não foi possível abrir a página. Confira a conexão e tente novamente.');
+      if (tab.closed) throw new Error('A aba foi fechada antes de concluir a abertura.');
+      return tab.view.webContents;
+    },
     isDestroyed: () => group.closed || current.win.isDestroyed(),
     show: () => { if (!current.win.isDestroyed()) { current.win.show(); activate(current, current.tabs.find(item => item.id === group.lastTabId) || [...group.tabs][0]); } },
     restore: () => { if (!current.win.isDestroyed() && current.win.isMinimized()) current.win.restore(); },

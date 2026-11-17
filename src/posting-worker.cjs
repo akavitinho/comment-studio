@@ -66,7 +66,7 @@ class PostingWorker {
       storageResult = await this.storage.upload(accountId, connection, prepared.file);
       this.plan.phase(item.id, 'processing', { storagePath: storageResult.objectPath }); this.onChange();
       if (this.plan.db.prepare('SELECT status FROM schedules WHERE account_id=?').get(accountId)?.status !== 'running') throw Object.assign(new Error('Programação pausada antes da publicação.'), { interrupted: true });
-      const token = await this.auth.token(accountId);
+      const token = await this.auth.token(accountId, connection);
       const publisher = this.makePublisher({ fetch: createProxyFetch(this.net, connection), version: this.auth.data.graphVersion });
       const creationId = await publisher.create(this.auth.status(accountId).igId, token, storageResult.signedUrl, item.caption);
       this.plan.phase(item.id, 'processing', { creationId }); this.onChange();

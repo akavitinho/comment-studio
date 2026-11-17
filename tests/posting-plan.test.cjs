@@ -13,6 +13,11 @@ test('pasta por conta importa em ordem natural e ignora vídeos já enfileirados
   const plan = new PostingPlan(path.join(dir, 'postings.sqlite'));
   try {
     plan.saveMediaSettings('a', { folder, cover });
+    const savedCover = plan.mediaSettings('a').cover;
+    assert.notEqual(savedCover, cover);
+    assert.equal(plan.mediaSettings('a').cover_name, 'capa.png');
+    fs.unlinkSync(cover);
+    assert.equal(fs.readFileSync(savedCover, 'utf8'), 'image');
     plan.saveMediaSettings('b', { folder });
     const first = plan.importFolder('a', 'Conta A');
     assert.equal(first.importedCount, 3);
@@ -21,10 +26,50 @@ test('pasta por conta importa em ordem natural e ignora vídeos já enfileirados
     assert.equal(plan.importFolder('b').importedCount, 3);
     plan.saveMediaSettings('a', { cover: null });
     assert.equal(plan.mediaSettings('a').cover, null);
+    assert.equal(fs.existsSync(savedCover), false);
     assert.equal(plan.mediaSettings('b').cover, null);
     const reopened = new PostingPlan(path.join(dir, 'postings.sqlite'));
     try { assert.equal(reopened.mediaSettings('a').folder, folder); assert.equal(reopened.snapshot().items.length, 6); }
     finally { reopened.close(); }
+  } finally { plan.close(); fs.rmSync(dir, { recursive: true, force: true }); }
+});
+test('capa existente é copiada ao abrir banco antigo e sobrevive à limpeza da pasta original', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'studio-cover-migration-'));
+  const source = path.join(dir, 'capas', 'original.png'); fs.mkdirSync(path.dirname(source)); fs.writeFileSync(source, 'original');
+  const file = path.join(dir, 'postings.sqlite');
+  const plan = new PostingPlan(file);
+  try { plan.saveMediaSettings('a', { cover: source }); }
+  finally { plan.close(); }
+  const database = new DatabaseSync(file);
+  const managed = database.prepare('SELECT cover FROM posting_media_settings WHERE account_id=?').get('a').cover;
+  database.prepare('UPDATE posting_media_settings SET cover=?,cover_name=NULL WHERE account_id=?').run(source, 'a');
+  database.close(); fs.unlinkSync(managed);
+  const reopened = new PostingPlan(file);
+  try {
+    const migrated = reopened.mediaSettings('a');
+    assert.notEqual(migrated.cover, source);
+    assert.equal(migrated.cover_name, 'original.png');
+    fs.unlinkSync(source);
+    assert.equal(fs.readFileSync(migrated.cover, 'utf8'), 'original');
+  } finally { reopened.close(); fs.rmSync(dir, { recursive: true, force: true }); }
+});
+test('trocar ou remover capa limpa apenas a cópia gerenciada', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'studio-cover-replace-'));
+  const source = path.join(dir, 'capa.png'); fs.writeFileSync(source, 'primeira');
+  const plan = new PostingPlan(path.join(dir, 'postings.sqlite'));
+  try {
+    plan.saveMediaSettings('a', { cover: source });
+    const first = plan.mediaSettings('a').cover;
+    fs.writeFileSync(source, 'segunda');
+    plan.saveMediaSettings('a', { cover: source });
+    const second = plan.mediaSettings('a').cover;
+    assert.notEqual(first, second);
+    assert.equal(fs.existsSync(first), false);
+    assert.equal(fs.readFileSync(second, 'utf8'), 'segunda');
+    assert.equal(fs.readFileSync(source, 'utf8'), 'segunda');
+    plan.cancelAccount('a');
+    assert.equal(fs.existsSync(second), false);
+    assert.equal(fs.existsSync(source), true);
   } finally { plan.close(); fs.rmSync(dir, { recursive: true, force: true }); }
 });
 test('ordem dos vídeos migra como sequência e sorteia apenas a fila da conta quando escolhida', () => {

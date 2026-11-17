@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu, ipcMain, session, safeStorage, net, dialog, shell, nativeImage } = require('electron');
+const { app, BrowserWindow, Menu, ipcMain, session, safeStorage, net, dialog, shell, nativeImage, clipboard } = require('electron');
 const path = require('node:path');
 const fs = require('node:fs');
 const { execFile } = require('node:child_process');
@@ -8,6 +8,8 @@ const { pathToFileURL } = require('node:url');
 const { isIP } = require('node:net');
 const { Store } = require('./store.cjs');
 const domain = require('./domain.cjs');
+const { creatorHandlers, publicAccount } = require('./instagram-creator.cjs');
+const { signupURL: instagramSignupURL, startInstagramSignupFill } = require('./instagram-signup-fill.cjs');
 const { windowTitle } = require('./window-title.cjs');
 const { Automation, videoKey, targetURL, campaignTargets } = require('./automation.cjs');
 const { XAutomation } = require('./x-automation.cjs');
@@ -33,13 +35,17 @@ const { binaryPath } = require('./runtime-binaries.cjs');
 const { campaignAnalytics } = require('./campaign-analytics.cjs');
 
 const root = path.join(__dirname, '..');
-const smoke = process.argv.includes('--smoke');
+const dashboardSmoke=process.argv.includes('--smoke-dashboard');
+const smoke = dashboardSmoke || process.argv.includes('--smoke');
 const xReadOnly = process.argv.includes('--check-x-readonly');
 const dataDir = app.isPackaged ? app.getPath('userData') : path.join(root, smoke ? `.smoke/run-${Date.now()}` : '.local');
 fs.mkdirSync(dataDir, { recursive: true });
 if (!app.isPackaged) app.setPath('userData', dataDir);
 app.setPath('sessionData', path.join(dataDir, 'browser'));
 app.commandLine.appendSwitch('disable-blink-features', 'AutomationControlled');
+// Prevent Electron/app name from leaking into HTTP headers and navigator properties
+app.commandLine.appendSwitch('disable-features', 'ElectronSerialChooser,HardwareMediaKeyHandling');
+app.commandLine.appendSwitch('enable-features', 'ReduceUserAgentMinorVersion');
 const sitePreloadPath = path.join(dataDir, 'site-preload.generated.cjs');
 fs.writeFileSync(sitePreloadPath, "'use strict';\nconst { webFrame } = require('electron');\nwebFrame.executeJavaScript(" + JSON.stringify(stealthPatchSource()) + ").catch(() => {});\n");
 const homeURL = pathToFileURL(path.join(__dirname, 'ui', 'index.html')).href;
@@ -47,6 +53,7 @@ const execFileAsync = promisify(execFile);
 const thumbnailCache = new Map();
 const postingProfilePictures = new Map();
 let mainWindow, store, automation, xAutomation, mediaProcessor, videoDownloader, postingPlan, metaAuth, facebookAuth, tiktokAnalytics, postingStorage, postingWorker;
+const pendingInstagramLinks = new Map();
 let postingFolderSyncTimer;
 const accountWindows = new Map();
 const proxyBrowserWindows = new Map();
@@ -59,6 +66,9 @@ let tlsProxyReady;
 const lastErrors = new Map();
 const authByContents = new Map();
 const busyConnections = new Set();
+let instagramCoordinator = null;
+const { InstagramInsightsCoordinator } = require('./instagram-insights-coordinator.cjs');
+const { createInstagramCollector } = require('./instagram-insights-collector.cjs');
 async function confirmRestartCycle(id) {
   const account = getAccount(id);
   if (automation.accountProgress.get(id)?.status !== 'waiting') return snapshot();
@@ -89,6 +99,7 @@ function ensureClosed(account) {
 }
 function clearPrepared(id) {
   prepared.delete(`persist:account-${id}`);
+  prepared.delete(`persist:posting-account-${id}`);
   tlsProxy.deallocate(`persist:account-${id}`);
 }
 async function lookupLocation(ip) {
@@ -110,7 +121,11 @@ async function lookupLocation(ip) {
     });
     if (result.ip !== ip || result.error || result.is_bogon) return null;
     const clean = value => typeof value === 'string' ? value.slice(0, 120) : null;
-    return { city: clean(result.city), region: clean(result.region), country: clean(result.country), network: clean(result.asn || result.company), source: 'ipapi.is' };
+    const location = result.location ?? result;
+    return {
+      city: clean(location.city), region: clean(location.state || location.region), country: clean(location.country),
+      network: clean(result.asn?.descr || result.company?.name || result.asn || result.company), source: 'ipapi.is'
+    };
   } catch { return null; }
 }
 
@@ -127,7 +142,7 @@ function accountPlatform(account) {
 }
 function snapshot() {
   return {
-    accounts: store.data.accounts.map(a => ({ ...a, open: accountWindows.has(a.id), browserOpen: freeAccountWindows.has(a.id), error: lastErrors.get(a.id) || null, meta: a.platform === 'instagram' ? metaAuth?.status(a.id) : undefined, facebook: a.platform === 'facebook' ? facebookAuth?.status(a.id) : undefined, tiktokAnalytics: a.platform === 'tiktok' ? tiktokAnalytics?.status(a.id) : undefined })),
+    accounts: store.data.accounts.map(a => ({ ...publicAccount(a), open: accountWindows.has(a.id), browserOpen: freeAccountWindows.has(a.id), error: lastErrors.get(a.id) || null, meta: a.platform === 'instagram' ? metaAuth?.status(a.id) : undefined, facebook: a.platform === 'facebook' ? facebookAuth?.status(a.id) : undefined, tiktokAnalytics: a.platform === 'tiktok' ? tiktokAnalytics?.status(a.id) : undefined })),
     accountTags: store.data.accountTags || [],
     proxies: store.data.proxies.map(({ credentials, ...p }) => ({ ...p, authenticated: Boolean(credentials), browserOpen: Boolean(proxyBrowserWindows.get(p.id) && !proxyBrowserWindows.get(p.id).isDestroyed()) })),
     campaign: store.data.campaign, events: store.data.events, automation: automation?.snapshot(),
@@ -157,21 +172,37 @@ function configStealth(ses) {
     .replace(/ [\w\s-]+\/[\d.]+(?= Chrome\/)/g, '');
   ses.setUserAgent(cleanUA);
   // Override Sec-CH-UA headers to include Google Chrome branding.
-  // Google blocks login from embedded browsers that lack this brand.
+  // Google/Instagram block login from embedded browsers that lack this brand.
   const chromeMatch = cleanUA.match(/Chrome\/(\d+)/);
   const chromeMajor = chromeMatch ? chromeMatch[1] : '134';
   const chromeFullMatch = cleanUA.match(/Chrome\/([\d.]+)/);
   const chromeFull = chromeFullMatch ? chromeFullMatch[1] : chromeMajor;
   const brandHeader = `"Chromium";v="${chromeMajor}", "Google Chrome";v="${chromeMajor}", "Not:A-Brand";v="99"`;
   const brandFullHeader = `"Chromium";v="${chromeFull}", "Google Chrome";v="${chromeFull}", "Not:A-Brand";v="99.0.0.0"`;
+  const platform = process.platform === 'win32' ? 'Windows' : process.platform === 'darwin' ? 'macOS' : 'Linux';
   ses.webRequest.onBeforeSendHeaders((details, callback) => {
     const headers = { ...details.requestHeaders };
     const keys = Object.keys(headers);
     for (const k of keys) {
       const lk = k.toLowerCase();
-      if (lk === 'sec-ch-ua') { delete headers[k]; headers['Sec-CH-UA'] = brandHeader; }
-      if (lk === 'sec-ch-ua-full-version-list') { delete headers[k]; headers['Sec-CH-UA-Full-Version-List'] = brandFullHeader; }
-      // Remove Electron from Sec-CH-UA-Platform-Version if present
+      if (lk === 'sec-ch-ua') { delete headers[k]; }
+      if (lk === 'sec-ch-ua-full-version-list') { delete headers[k]; }
+      if (lk === 'sec-ch-ua-mobile') { delete headers[k]; }
+      if (lk === 'sec-ch-ua-platform') { delete headers[k]; }
+      // Remove any header that may leak Electron or app name
+      if (lk === 'user-agent') { delete headers[k]; }
+    }
+    headers['User-Agent'] = cleanUA;
+    headers['Sec-CH-UA'] = brandHeader;
+    headers['Sec-CH-UA-Full-Version-List'] = brandFullHeader;
+    headers['Sec-CH-UA-Mobile'] = '?0';
+    headers['Sec-CH-UA-Platform'] = `"${platform}"`;
+    // Fix Sec-Fetch-* headers for top-level navigation to look like real Chrome
+    if (details.resourceType === 'mainFrame') {
+      headers['Sec-Fetch-Dest'] = 'document';
+      headers['Sec-Fetch-Mode'] = 'navigate';
+      headers['Sec-Fetch-Site'] = 'none';
+      headers['Sec-Fetch-User'] = '?1';
     }
     callback({ requestHeaders: headers });
   });
@@ -182,6 +213,12 @@ async function prepareAccount(id) {
   if (account.proxyId && !proxy) throw new Error('O proxy desta conta não foi encontrado.');
   if (proxy && account.browserProfile === 'proxy') return { ...await prepareProxyBrowser(proxy.id), account };
   return prepareConnection(`persist:account-${account.id}`, account, proxy);
+}
+async function preparePostingAccount(id) {
+  const account = getAccount(id);
+  if (!['instagram', 'facebook'].includes(account.platform)) throw new Error('Esta conta não publica posts ou Reels.');
+  const proxy = domain.postingProxy(account, store.data.proxies);
+  return prepareConnection(`persist:posting-account-${id}`, account, proxy);
 }
 async function prepareTikTokAnalyticsAccount(id) {
   const account = getAccount(id);
@@ -201,6 +238,9 @@ async function prepareProxyBrowser(id) {
 }
 function injectStealth(contents, profile) {
   const patch = stealthPatchSource(profile || null);
+  contents.on('console-message', (_event, level, message, line, sourceId) => {
+    if (level >= 2) console.log('[PAGE-ERROR]', sourceId?.split('/').pop(), ':', line, message?.slice(0, 300));
+  });
   const inject = () => { contents.executeJavaScript(patch).catch(() => {}); };
   contents.on('dom-ready', inject);
   contents.on('did-start-navigation', (_event, url, _isInPlace, isMainFrame) => {
@@ -211,7 +251,7 @@ function registerFreeContents(contents, config, openPopup) {
   authByContents.set(contents.id, config);
   contents.setWebRTCIPHandlingPolicy('disable_non_proxied_udp');
   injectStealth(contents, config.account ? config.account.fingerprint : null);
-  const checkNavigation = (event, next) => { if (!next.startsWith('https://') && next !== 'about:blank') event.preventDefault(); };
+  const checkNavigation = (event, next) => { if (!next.startsWith('https://') && next !== 'about:blank' && !next.startsWith('blob:') && !next.startsWith('data:')) event.preventDefault(); };
   contents.on('will-navigate', checkNavigation);
   contents.on('will-redirect', checkNavigation);
   contents.setWindowOpenHandler(details => {
@@ -244,25 +284,39 @@ function linkProxyBrowser(account) {
   if (postingWorker.active.has(account.id)) throw new Error('Aguarde a publicação em andamento antes de trocar o perfil do navegador.');
   if (xAutomation?.owns(account.id) || xAutomation?.checking) throw new Error('Pare o aquecimento do X antes de trocar o perfil do navegador.');
   if (accountWindows.has(account.id)) throw new Error(`Feche a janela de ${account.name} antes de trocar o perfil do navegador.`);
-  freeAccountWindows.get(account.id)?.close();
+  closeFreeAccountBrowsers(account.id);
   account.browserProfile = 'proxy';
   clearPrepared(account.id);
   store.log(`Navegador da proxy vinculado à conta ${account.name}.`);
 }
-async function openAccountBrowser(id) {
+function closeFreeAccountBrowsers(id) {
+  for (const window of freeAccountWindows.get(id) || []) window.close();
+}
+async function ensureAccountBrowser(id, { loadHome = true, newWindow = false } = {}) {
   const account = getAccount(id);
   const proxyHasOwner = store.data.accounts.some(item => item.id !== id && item.proxyId === account.proxyId && item.browserProfile === 'proxy');
-  if (account.proxyId && account.browserProfile !== 'proxy' && !proxyHasOwner) linkProxyBrowser(account);
-  const existing = freeAccountWindows.get(id);
-  if (existing && !existing.isDestroyed()) { existing.show(); existing.restore(); existing.focus(); return snapshot(); }
+  if (account.proxyId && !account.registration && account.browserProfile !== 'proxy' && !proxyHasOwner) linkProxyBrowser(account);
+  const windows = freeAccountWindows.get(id) || new Set();
+  const existing = [...windows].findLast(window => !window.isDestroyed());
+  if (!newWindow && existing) return existing;
   const config = await prepareAccount(id);
   const { proxy, ses } = config;
   const win = await openFreeBrowser({ title: `Navegador · ${account.name}${proxy ? ` · ${proxy.name}` : ' · Direta'}`, session: ses,
-    startURL: 'https://www.google.com/', show: !smoke, preload: sitePreloadPath, register: (contents, createPopup) => registerFreeContents(contents, config, createPopup),
-    onClose: () => { freeAccountWindows.delete(id); void ses.flushStorageData(); }
+    startURL: 'https://www.google.com/', loadHome, newWindow, show: !smoke, preload: sitePreloadPath, register: (contents, createPopup) => registerFreeContents(contents, config, createPopup),
+    onClose: () => {
+      windows.delete(win);
+      if (!windows.size && freeAccountWindows.get(id) === windows) freeAccountWindows.delete(id);
+      void ses.flushStorageData();
+    }
   });
-  freeAccountWindows.set(id, win);
+  windows.add(win);
+  freeAccountWindows.set(id, windows);
   store.log(`Navegador livre de ${account.name} aberto.`);
+  return win;
+}
+async function openAccountBrowser(id) {
+  const win = await ensureAccountBrowser(id);
+  if (!smoke) { win.show(); win.restore(); win.focus(); }
   return snapshot();
 }
 async function prepareConnection(key, account, proxy) {
@@ -327,6 +381,7 @@ async function openAccount(id, testURL, { background = false } = {}) {
   accountWindows.set(id, win);
   authByContents.set(win.webContents.id, config);
   win.webContents.setWebRTCIPHandlingPolicy('disable_non_proxied_udp');
+  win.webContents.on('before-input-event', (_event, input) => { if (input.type === 'keyDown' && input.key === 'F12') win.webContents.toggleDevTools(); });
   injectStealth(win.webContents, account.fingerprint || null);
   const load = url => automation.bounded(win, 'abrir janela', 30000, () => win.loadURL(url)).catch(error => {
     lastErrors.set(id, safeError(error));
@@ -347,10 +402,25 @@ async function openAccount(id, testURL, { background = false } = {}) {
   ]));
   win.refreshCampaignMenu();
   win.webContents.on('page-title-updated', event => { event.preventDefault(); win.setTitle(accountTitle(account, platform, proxy)); });
-  const checkNavigation = (event, url) => { if (!url.startsWith('https://')) event.preventDefault(); };
+  const checkNavigation = (event, url) => { if (!url.startsWith('https://') && !url.startsWith('blob:') && !url.startsWith('data:')) event.preventDefault(); };
   win.webContents.on('will-navigate', checkNavigation);
   win.webContents.on('will-redirect', checkNavigation);
-  win.webContents.setWindowOpenHandler(() => { store.log(`Uma janela adicional foi bloqueada em ${account.name}. Nesta versão, use o login na própria página.`); return { action: 'deny' }; });
+  win.webContents.setWindowOpenHandler(details => {
+    // Allow same-site popups (Instagram Stories/Highlights modals)
+    try {
+      const target = new URL(details.url);
+      const current = new URL(win.webContents.getURL());
+      if (target.hostname === current.hostname || details.url === 'about:blank') {
+        return { action: 'allow', overrideBrowserWindowOptions: { show: true, webPreferences: { preload: sitePreloadPath, session: ses, sandbox: true, nodeIntegration: false, contextIsolation: true, webSecurity: true } } };
+      }
+    } catch {}
+    store.log(`Popup externo bloqueado em ${account.name}: ${details.url?.slice(0, 80)}`);
+    return { action: 'deny' };
+  });
+  win.webContents.on('did-create-window', child => {
+    injectStealth(child.webContents, account.fingerprint || null);
+    child.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  });
   win.webContents.on('did-fail-load', (_event, code, description, _url, isMainFrame) => {
     if (isMainFrame && code !== -3) lastErrors.set(id, safeError({ message: description }));
   });
@@ -424,7 +494,34 @@ async function validateNewProxy(proxy, credentials) {
   } finally { await ses.closeAllConnections(); }
 }
 
+async function bindInstagramAuthorization(id, result) {
+  const account = getAccount(id);
+  const selected = result.profile;
+  const choice = await dialog.showMessageBox(mainWindow, { type: 'question', title: 'Confirmar perfil Instagram', message: `Conectar @${selected.username} a ${account.name}?`, detail: 'Este é o perfil autorizado diretamente pelo Instagram. Confira antes de vincular.', buttons: ['Vincular perfil', 'Cancelar'], defaultId: 1, cancelId: 1, noLink: true });
+  if (choice.response !== 0) return { ...snapshot(), metaConnectionCancelled: true };
+  const registered = String(account.handle || '').replace(/^@/, '').toLowerCase();
+  if (registered && selected.username && registered !== selected.username.toLowerCase()) {
+    const warning = await dialog.showMessageBox(mainWindow, { type: 'warning', title: 'Perfis diferentes', message: `O cadastro é @${registered}, mas a Meta autorizou @${selected.username}.`, detail: 'Confira se esta é a conta correta antes de vinculá-la. A publicação usará o ID do perfil autorizado pela Meta.', buttons: ['Voltar', 'Vincular este perfil'], defaultId: 0, cancelId: 0, noLink: true });
+    if (warning.response !== 1) return { ...snapshot(), metaConnectionCancelled: true };
+  }
+  await metaAuth.bind(id, selected);
+  domain.applyInstagramIdentity(account, selected.username);
+  store.log(`Instagram conectado: @${selected.username}.`);
+  return snapshot();
+}
+
 const handlers = {
+  ...creatorHandlers({ getStore: () => store, safeStorage, ensureFingerprint, ensureClosed, clearPrepared, snapshot,
+    openSignup: async id => {
+      const browser = await ensureAccountBrowser(id, { loadHome: false, newWindow: true });
+      const contents = await browser.loadInitialPage(smoke ? 'about:blank' : instagramSignupURL);
+      if (!smoke) {
+        const secret = getAccount(id).creatorSecret;
+        const decrypted = await safeStorage.decryptStringAsync(Buffer.from(secret, 'base64'));
+        startInstagramSignupFill(contents, JSON.parse(decrypted.result));
+      }
+    }
+  }),
   state: () => snapshot(),
   saveTikTokAnalyticsSettings: async input => { await tiktokAnalytics.configure(input); return snapshot(); },
   connectTikTokAnalytics: async id => {
@@ -461,14 +558,24 @@ const handlers = {
     const connection = await prepareConnection(`persist:facebook-login-${proxyId || 'direct'}`, { platform: 'facebook' }, proxy);
     return facebookAuth.connect(connection);
   },
-  bindFacebookPages: async ({ flowId, pageIds, proxyId = null }) => {
+  copyFacebookLoginLink: async ({ proxyId = null } = {}) => {
     const proxy = proxyId ? store.data.proxies.find(item => item.id === proxyId) : null;
     if (proxyId && !proxy) throw new Error('Proxy não encontrada.');
+    const connection = await prepareConnection(`persist:facebook-login-${proxyId || 'direct'}`, { platform: 'facebook' }, proxy);
+    const { loginUrl, ...result } = await facebookAuth.startExternal(connection);
+    clipboard.writeText(loginUrl);
+    return result;
+  },
+  completeFacebookExternalLogin: ({ flowId, callbackUrl }) => facebookAuth.completeExternal(flowId, callbackUrl),
+  bindFacebookPages: async ({ flowId, pageIds, proxyId = null, postingConnection }) => {
+    const proxy = proxyId ? store.data.proxies.find(item => item.id === proxyId) : null;
+    if (proxyId && !proxy) throw new Error('Proxy não encontrada.');
+    const publicationRoute = domain.postingConnection(postingConnection, proxyId);
     const pages = facebookAuth.takePages(flowId, pageIds);
     for (const page of pages) {
       let account = store.data.accounts.find(item => item.platform === 'facebook' && item.facebookPageId === page.id);
-      if (!account) { account = domain.account({ platform: 'facebook', name: page.name, proxyId }, store.data.proxies); account.facebookPageId = page.id; store.data.accounts.push(account); }
-      else { account.name = page.name; account.proxyId = proxyId; }
+      if (!account) { account = domain.account({ platform: 'facebook', name: page.name, proxyId, postingConnection: publicationRoute }, store.data.proxies); account.facebookPageId = page.id; store.data.accounts.push(account); }
+      else { if (postingWorker.active.has(account.id)) throw new Error('Aguarde a publicação em andamento antes de mudar a conexão da Página.'); const proxyChanged = account.proxyId !== proxyId; if (proxyChanged) ensureClosed(account); account.name = page.name; account.proxyId = proxyId; account.postingConnection = publicationRoute; if (proxyChanged) clearPrepared(account.id); else prepared.delete(`persist:posting-account-${account.id}`); }
       await facebookAuth.bind(account.id, page);
     }
     store.save(); return snapshot();
@@ -497,12 +604,12 @@ const handlers = {
   refreshFacebookInsights: async accountId => {
     const account = getAccount(accountId);
     if (account.platform !== 'facebook' || !facebookAuth.status(accountId).connected) throw new Error('Conecte a Página Facebook.');
-    const token = await facebookAuth.token(accountId), connection = await prepareAccount(accountId);
+    const token = await facebookAuth.token(accountId), connection = await preparePostingAccount(accountId);
     const publisher = new MetaPublisher({ fetch: createProxyFetch(net, connection), version: 'v27.0' });
     const metrics = {};
     for (const metric of ['page_media_view', 'page_total_media_view_unique']) {
       try { const data = await publisher.callFacebook('GET', `${account.facebookPageId}/insights`, token, { metric, period: 'day', since: Math.floor((Date.now() - 30 * 86400000) / 1000), until: Math.floor(Date.now() / 1000) }); const values = (data.data || []).flatMap(row => row.values || []); metrics[metric] = values.length ? values.reduce((total, value) => total + Number(value.value || 0), 0) : null; }
-      catch (error) { metrics[metric] = null; if (error.metaCode === 190) facebookAuth.markReconnect(accountId); }
+      catch (error) { metrics[metric] = null; if ([190,102].includes(error.metaCode)) facebookAuth.markReconnect(accountId); }
     }
     postingPlan.db.prepare('INSERT INTO facebook_page_insights (account_id,media_views,unique_viewers,fetched_at) VALUES (?,?,?,?) ON CONFLICT(account_id) DO UPDATE SET media_views=excluded.media_views,unique_viewers=excluded.unique_viewers,fetched_at=excluded.fetched_at').run(accountId, metrics.page_media_view, metrics.page_total_media_view_unique, new Date().toISOString());
     return snapshot();
@@ -556,146 +663,100 @@ const handlers = {
     });
     return result;
   },
-  instagramOfficialMetrics: async ({ accountIds, from, to, allMedia = false }) => {
-    const ids = [...new Set(accountIds || [])].filter(id => { const account=getAccount(id), auth=metaAuth.status(id); return account.platform==='instagram' && auth.connected && auth.insightsGranted; });
-    return { ...postingPlan.accountInsights.official(ids,from,to,{allMedia:Boolean(allMedia)}), authorizedIds: ids };
+  instagramOfficialMetrics: async ({ accountIds, from, to, allMedia = false, mediaFrom }) => {
+    const ids = [...new Set(accountIds || [])].filter(id => getAccount(id).platform==='instagram');
+    const authorizedIds=ids.filter(id=>{const auth=metaAuth.status(id);return auth.connected&&auth.insightsGranted;});
+    return { ...postingPlan.accountInsights.official(ids,from,to,{allMedia:Boolean(allMedia),mediaFrom}), history: ids.flatMap(id=>postingPlan.db.prepare('SELECT h.* FROM media_insight_history h JOIN items i ON i.id=h.item_id WHERE i.account_id=? AND h.fetched_at>=? AND h.fetched_at<=?').all(id,new Date(from).toISOString(),new Date(to).toISOString())), authorizedIds, collection: instagramCoordinator?.snapshot().active || instagramCoordinator?.snapshot().last, collections:instagramCoordinator?.snapshot(), requestedRange:{from,to}, accounts: ids.map(id=>({accountId:id,...postingPlan.accountInsights.status(id)})) };
   },
-  refreshInstagramInsights: async accountIds => {
-    if (busyConnections.has('instagram-insights')) return { state: snapshot(), backgroundActive: true, alreadyRunning: true };
-    busyConnections.add('instagram-insights');
-    try {
-      const ranges = !Array.isArray(accountIds) && Array.isArray(accountIds?.ranges) ? accountIds.ranges.slice(0,2) : [];
-      for (const range of ranges) if (!Number.isFinite(range.from)||!Number.isFinite(range.to)||range.from>=range.to||range.to-range.from>90*86400000) throw new Error('Intervalo de Insights inválido (máximo 90 dias).');
-      const requested = [...new Set(Array.isArray(accountIds) ? accountIds : accountIds?.accountIds || [])];
-      for (const id of requested) if (getAccount(id).platform !== 'instagram') throw new Error('Selecione apenas contas Instagram.');
-      const selected = requested.length ? requested : store.data.accounts.filter(account => account.platform === 'instagram').map(account => account.id);
-      const refreshId = randomUUID();
-      const items = selected.flatMap(id => postingPlan.accountInsights.selectMedia(id));
-      const publishers = new Map();
-      const failedAccounts = new Set();
-      const failures = [];
-      let updated = 0, withoutPermission = 0, failed = 0, processed = 0, accountDaysChecked = 0, totalsSucceeded = 0, totalsAvailable = 0;
-      let accountsProcessed = 0;
-      const emitProgress = progress => {
-        if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('studio:insights-progress', { platform: 'instagram', refreshId, ...progress });
-      };
-      let nextAccount = 0;
-      const collectTotals = async () => {
-        while (nextAccount < selected.length) {
-        const id = selected[nextAccount++];
-        const status=metaAuth.status(id);
-        if (!status?.connected || !status.insightsGranted) { accountsProcessed++; emitProgress({phase:'official-ready',accountId:id,accountsProcessed,accountsTotal:selected.length}); continue; }
-        try {
-          const connection=await prepareAccount(id),token=await metaAuth.token(id);
-          const publisher=new MetaPublisher({fetch:createProxyFetch(net,connection),version:metaAuth.settings().graphVersion});
-          publishers.set(id,{token,publisher});
-          const options=postingPlan.accountInsights.metricOptions(id,publisher.version,'account');
-          if (!(postingPlan.accountInsights.status(id)?.retry_at>Date.now())) for (const range of ranges) {
-            const recent=postingPlan.db.prepare("SELECT fetched_at FROM official_account_metrics WHERE account_id=? AND start_at=? AND end_at=? AND metric='views'").get(id,range.from,range.to);
-            if(recent?.fetched_at>Date.now()-15*60000)continue;
-            postingPlan.accountInsights.saveMetrics(id,range.from,range.to,await publisher.accountMetrics(status.igId,token,range.from,range.to,options));
-          }
-          if (ranges.length && postingPlan.db.prepare("SELECT 1 FROM official_account_metrics WHERE account_id=? AND start_at=? AND end_at>? AND end_at<=? AND metric='views' LIMIT 1").get(id,ranges[0].from,ranges[0].from,ranges[0].to)) totalsAvailable++;
-          totalsSucceeded++;
-        }catch(error){
-          if(error.metaCode===190)metaAuth.markReconnect(id);
-          if(error.retryAfterMinutes||error.transient||[4,17,32,613].includes(error.metaCode)){
-            const saved=postingPlan.accountInsights.status(id);
-            postingPlan.accountInsights.setStatus(id,saved?.status||'pending',saved?.breakdown,Date.now()+(error.retryAfterMinutes||15)*60000,'Coleta interrompida por limite temporário; dados preservados.');
-          }
-          failedAccounts.add(id);failures.push(`Totais da conta: ${safeError(error)}`);
-        }finally{accountsProcessed++;emitProgress({phase:'official-ready',accountId:id,accountsProcessed,accountsTotal:selected.length});}
-        }
-      };
-      await Promise.all(Array.from({length:Math.min(2,selected.length)},()=>collectTotals()));
-      emitProgress({phase:'totals-complete',accountsProcessed,accountsTotal:selected.length,failures:[...failures]});
-      const primaryResult={ state:snapshot(), backgroundActive:true, refreshId, accounts:selected.length, totalsSucceeded, totalsAvailable, failures:[...failures], at:new Date().toISOString() };
-      const collectBackground = async () => {
-      emitProgress({phase:'background-start',accountsTotal:selected.length,reelsTotal:items.length});
-      for (const id of selected) {
-        if(failedAccounts.has(id))continue;
-        const status = metaAuth.status(id);
-        if (!status?.connected || !status.insightsGranted) continue;
-        try {
-          const {token,publisher}=publishers.get(id);
-          await postingPlan.accountInsights.refresh(id, status.igId, token, publisher, progress => {
-            accountDaysChecked++;
-            emitProgress({ phase: 'accounts', ...progress });
-          });
-          const collectionStatus = postingPlan.accountInsights.status(id);
-          if (collectionStatus?.retry_at > Date.now() && collectionStatus.message.startsWith('Coleta interrompida')) failedAccounts.add(id);
-          if (!(collectionStatus?.retry_at > Date.now())) {
-            const last=postingPlan.db.prepare('SELECT MAX(fetched_at) AS at FROM official_followers WHERE account_id=?').get(id);
-            if (!last.at || last.at<Date.now()-3600000) {
-              const profile=await publisher.call('GET',status.igId,token,{fields:'followers_count'});
-              if (Number.isInteger(profile.followers_count)&&profile.followers_count>=0) postingPlan.db.prepare('INSERT INTO official_followers VALUES (?,?,?)').run(id,Date.now(),profile.followers_count);
-            }
-          }
-        } catch (error) {
-          if (error.metaCode === 190) metaAuth.markReconnect(id);
-          if (error.retryAfterMinutes || error.transient || [4,17,32,613].includes(error.metaCode)) {
-            const saved=postingPlan.accountInsights.status(id);
-            postingPlan.accountInsights.setStatus(id,saved?.status||'pending',saved?.breakdown,Date.now()+(error.retryAfterMinutes||15)*60000,'Coleta interrompida por limite temporário; dados preservados.');
-          }
-          if (error.metaCode !== 100) failedAccounts.add(id);
-          failures.push(`Totais da conta: ${safeError(error)}`);
-        }
-      }
-      for (const item of items) {
-        if (failedAccounts.has(item.account_id)) { failed++; processed++; if (processed % 5 === 0 || processed === items.length) emitProgress({ phase:'reels', processed, total:items.length, updated, failed, withoutPermission }); continue; }
-        const account = store.data.accounts.find(value => value.id === item.account_id && value.platform === 'instagram');
-        const status = account && metaAuth.status(item.account_id);
-        if (!status?.connected || !status.insightsGranted) { withoutPermission++; processed++; if (processed % 5 === 0 || processed === items.length) emitProgress({ phase:'reels', processed, total:items.length, updated, failed, withoutPermission }); continue; }
-        try {
-          if (!publishers.has(item.account_id)) {
-            const connection = await prepareAccount(item.account_id);
-            const token = await metaAuth.token(item.account_id);
-            publishers.set(item.account_id, { token, publisher: new MetaPublisher({ fetch: createProxyFetch(net, connection), version: metaAuth.settings().graphVersion }) });
-          }
-          const { token, publisher } = publishers.get(item.account_id);
-          postingPlan.accountInsights.attempted(item.id);
-          const values = await publisher.mediaMetrics(item.media_id, token, postingPlan.accountInsights.metricOptions(item.account_id,publisher.version,'media'));
-          postingPlan.accountInsights.saveMedia(item.id, values);
-          postingPlan.saveInsights(item.id, item.media_id, values);
-          updated++;
-        } catch (error) {
-          if (error.metaCode === 190) metaAuth.markReconnect(item.account_id);
-          if (error.retryAfterMinutes || error.transient || [4,17,32,613].includes(error.metaCode)) {
-            const saved = postingPlan.accountInsights.status(item.account_id);
-            postingPlan.accountInsights.setStatus(item.account_id, saved?.status || 'pending', saved?.breakdown, Date.now() + (error.retryAfterMinutes || 15) * 60000, 'Coleta interrompida por limite temporário; dados preservados.');
-          }
-          failedAccounts.add(item.account_id);
-          failures.push(`${account?.handle ? `@${account.handle}` : account?.name || 'Conta'}: ${safeError(error)}`);
-          failed++;
-        }
-        finally {
-          processed++;
-          if (processed % 5 === 0 || processed === items.length) emitProgress({ phase:'reels', processed, total: items.length, updated, failed, withoutPermission });
-        }
-      }
-      emitProgress({phase:'background-complete',checked:items.length,updated,withoutPermission,failed,failures,accountDaysChecked,accounts:selected.length,at:new Date().toISOString()});
-      };
-      void collectBackground().catch(error => emitProgress({phase:'background-complete',checked:items.length,updated,withoutPermission,failed:failed+1,failures:[...failures,safeError(error)],accountDaysChecked,accounts:selected.length})).finally(()=>busyConnections.delete('instagram-insights'));
-      return primaryResult;
-    } catch (error) { busyConnections.delete('instagram-insights'); throw error; }
+  refreshInstagramInsights: input => {
+    const request={accountIds:[...new Set(Array.isArray(input)?input:input?.accountIds||[])],ranges:input?.ranges||[],force:Boolean(input?.force),selectionKey:String(input?.selectionKey||'')};
+    if(!request.accountIds.length)throw new Error('Selecione ao menos uma conta Instagram.');
+    for(const id of request.accountIds)if(getAccount(id).platform!=='instagram')throw new Error('Selecione apenas contas Instagram.');
+    if(request.ranges.length>2)throw new Error('Até dois períodos por consulta.');
+    for(const range of request.ranges)if(!Number.isFinite(range.from)||!Number.isFinite(range.to)||range.from>=range.to||range.to-range.from>90*86400000||range.to>Date.now())throw new Error('Período inválido.');
+    return {...instagramCoordinator.submit(request),state:snapshot()};
   },
   connectMeta: async id => {
     const account = getAccount(id); if (account.platform !== 'instagram') throw new Error('Selecione uma conta Instagram.');
     if (postingWorker.active.has(id)) throw new Error('Aguarde a publicação em andamento antes de reconectar.');
     postingPlan.pauseAccount(id);
     const result = await metaAuth.connect(id);
-    const selected = result.profile;
-    const choice = await dialog.showMessageBox(mainWindow, { type: 'question', title: 'Confirmar perfil Instagram', message: `Conectar @${selected.username} a ${account.name}?`, detail: 'Este é o perfil autorizado diretamente pelo Instagram. Confira antes de vincular.', buttons: ['Vincular perfil', 'Cancelar'], defaultId: 1, cancelId: 1, noLink: true });
-    if (choice.response !== 0) return snapshot();
-    const registered = String(account.handle || '').replace(/^@/, '').toLowerCase();
-    if (registered && selected.username && registered !== selected.username.toLowerCase()) {
-      const warning = await dialog.showMessageBox(mainWindow, { type: 'warning', title: 'Perfis diferentes', message: `O cadastro é @${registered}, mas a Meta autorizou @${selected.username}.`, detail: 'Confira se esta é a conta correta antes de vinculá-la. A publicação usará o ID do perfil autorizado pela Meta.', buttons: ['Voltar', 'Vincular este perfil'], defaultId: 0, cancelId: 0, noLink: true });
-      if (warning.response !== 1) return snapshot();
+    return bindInstagramAuthorization(id, result);
+  },
+  startInstagramAccountLink: async input => {
+    if (input?.platform !== 'instagram') throw new Error('Selecione Instagram para adicionar por link.');
+    const draft = domain.account(input, store.data.proxies);
+    ensureFingerprint(draft);
+    if (input.postingSchedule) {
+      if (input.postingSchedule.mode !== 'fixed') throw new Error('Horários de postagem inválidos.');
+      validatePostingConfig(input.postingSchedule);
     }
-    await metaAuth.bind(id, selected);
-    domain.applyInstagramIdentity(account, selected.username);
-    store.log(`Instagram conectado: @${selected.username}.`);
-    return snapshot();
+    draft.browserProfile = draft.proxyId && !store.data.accounts.some(item => item.proxyId === draft.proxyId) ? 'proxy' : 'account';
+    const proxy = draft.proxyId ? store.data.proxies.find(item => item.id === draft.proxyId) : null;
+    const connection = await prepareConnection(`instagram-link-${draft.id}`, draft, proxy);
+    const { loginUrl, expiresAt } = await metaAuth.startAutomatic(draft.id, connection);
+    pendingInstagramLinks.set(draft.id, { draft, loginUrl, expiresAt, postingSchedule: input.postingSchedule || null, polling: false });
+    clipboard.writeText(loginUrl);
+    return { flowId: draft.id, expiresAt };
+  },
+  copyInstagramAccountLink: flowId => {
+    const pending = pendingInstagramLinks.get(flowId);
+    if (!pending || Date.now() >= Date.parse(pending.expiresAt)) throw new Error('O link expirou. Inicie outro cadastro.');
+    clipboard.writeText(pending.loginUrl);
+    return { expiresAt: pending.expiresAt };
+  },
+  pollInstagramAccountLink: async flowId => {
+    const pending = pendingInstagramLinks.get(flowId);
+    if (!pending) throw new Error('Este cadastro por link não está mais ativo.');
+    if (pending.polling) return { status: 'pending' };
+    pending.polling = true;
+    try {
+      const update = await metaAuth.pollAutomatic(flowId);
+      if (update.status === 'pending') return update;
+      if (pendingInstagramLinks.get(flowId) !== pending) throw new Error('Este cadastro foi cancelado.');
+      const profile = update.result.profile;
+      if (store.data.accounts.some(account => account.platform === 'instagram' && (metaAuth.status(account.id).igId === profile.igId || account.handle?.toLowerCase() === profile.username.toLowerCase()))) throw new Error('Este perfil Instagram já está cadastrado.');
+      domain.applyInstagramIdentity(pending.draft, profile.username);
+      try {
+        await metaAuth.bind(flowId, profile);
+        store.data.accounts.push(pending.draft);
+        if (pending.postingSchedule) postingPlan.configure(flowId, pending.postingSchedule);
+        store.log(`Instagram conectado por link: @${profile.username}.`);
+      } catch (error) {
+        store.data.accounts = store.data.accounts.filter(account => account.id !== flowId);
+        postingPlan.db.prepare('DELETE FROM schedules WHERE account_id=?').run(flowId);
+        metaAuth.disconnect(flowId);
+        store.save();
+        throw error;
+      }
+      return { status: 'connected', state: snapshot() };
+    } catch (error) {
+      if (!metaAuth.automatic.has(flowId)) return { status: 'failed', message: safeError(error) };
+      throw error;
+    } finally {
+      pending.polling = false;
+      if (!metaAuth.automatic.has(flowId)) { pendingInstagramLinks.delete(flowId); prepared.delete(`instagram-link-${flowId}`); }
+    }
+  },
+  cancelInstagramAccountLink: flowId => {
+    pendingInstagramLinks.delete(flowId);
+    metaAuth.cancelAutomatic(flowId);
+    prepared.delete(`instagram-link-${flowId}`);
+    return true;
+  },
+  copyInstagramLoginLink: async id => {
+    const account = getAccount(id); if (account.platform !== 'instagram') throw new Error('Selecione uma conta Instagram.');
+    if (postingWorker.active.has(id)) throw new Error('Aguarde a publicação em andamento antes de reconectar.');
+    const { loginUrl, expiresAt } = await metaAuth.startExternal(id);
+    clipboard.writeText(loginUrl);
+    return { expiresAt };
+  },
+  completeInstagramExternalLogin: async ({ accountId, callbackUrl }) => {
+    const account = getAccount(accountId); if (account.platform !== 'instagram') throw new Error('Selecione uma conta Instagram.');
+    if (postingWorker.active.has(accountId)) throw new Error('Aguarde a publicação em andamento antes de reconectar.');
+    postingPlan.pauseAccount(accountId);
+    const result = await metaAuth.completeExternal(accountId, callbackUrl);
+    return bindInstagramAuthorization(accountId, result);
   },
   disconnectMeta: id => { getAccount(id); if (postingWorker.active.has(id)) throw new Error('Aguarde a publicação em andamento antes de desconectar.'); postingPlan.pauseAccount(id); metaAuth.disconnect(id); return snapshot(); },
   savePostingSchedule: ({ accountId, ...config }) => { const account = getAccount(accountId); if (account.platform !== 'instagram') throw new Error('Selecione uma conta Instagram.'); if (postingWorker.active.has(accountId)) throw new Error('Aguarde a publicação em andamento antes de mudar os horários.'); postingPlan.configure(accountId, config); return snapshot(); },
@@ -711,9 +772,15 @@ const handlers = {
   },
   previewPostingSchedule: ({ accountId, ...config }) => { const account = getAccount(accountId); if (account.platform !== 'instagram') throw new Error('Selecione uma conta Instagram.'); return postingPlan.preview(accountId, config); },
   addPostingVideo: async ({ accountId, file, caption }) => { const account = getAccount(accountId); if (account.platform !== 'instagram') throw new Error('Selecione uma conta Instagram.'); postingPlan.add(accountId, file, caption, account.name); return snapshot(); },
-  savePostingMediaSettings: ({ accountId, facebookPageToken: _ignored, ...changes }) => { const account = getAccount(accountId); if (account.platform !== 'instagram') throw new Error('Selecione uma conta Instagram.'); if (changes.crossPostFacebook) { const pageId = changes.facebookPageId || postingPlan.mediaSettings(accountId).facebook_page_id; if (!store.data.accounts.some(page => page.platform === 'facebook' && page.facebookPageId === pageId && facebookAuth.status(page.id).connected)) throw new Error('Conecte e selecione uma Página Facebook.'); } postingPlan.saveMediaSettings(accountId, changes); return snapshot(); },
+  savePostingMediaSettings: ({ accountId, facebookPageToken: _ignored, ...changes }) => { const account = getAccount(accountId); if (account.platform !== 'instagram') throw new Error('Selecione uma conta Instagram.'); if (changes.cover !== undefined && postingWorker.active.has(accountId)) throw new Error('Aguarde a publicação em andamento antes de alterar a capa.'); if (changes.crossPostFacebook) { const pageId = changes.facebookPageId || postingPlan.mediaSettings(accountId).facebook_page_id; if (!store.data.accounts.some(page => page.platform === 'facebook' && page.facebookPageId === pageId && facebookAuth.status(page.id).connected)) throw new Error('Conecte e selecione uma Página Facebook.'); } postingPlan.saveMediaSettings(accountId, changes); return snapshot(); },
   selectPostingFolder: ({ accountId, folder }) => { const account = getAccount(accountId); if (account.platform !== 'instagram') throw new Error('Selecione uma conta Instagram.'); postingPlan.saveMediaSettings(accountId, { folder }); const result = postingPlan.importFolder(accountId, account.name); return { ...snapshot(), importedCount: result.importedCount, skippedCount: result.skippedCount }; },
   importPostingFolder: ({ accountId }) => { const account = getAccount(accountId); if (account.platform !== 'instagram') throw new Error('Selecione uma conta Instagram.'); const result = postingPlan.importFolder(accountId, account.name); return { ...snapshot(), importedCount: result.importedCount, skippedCount: result.skippedCount }; },
+  updatePostingCaptions: ({ accountIds, caption, onlyEmpty = false }) => {
+    if (!Array.isArray(accountIds) || !accountIds.length) throw new Error('Selecione pelo menos uma conta Instagram.');
+    for (const id of accountIds) if (getAccount(id).platform !== 'instagram') throw new Error('Selecione apenas contas Instagram.');
+    const result = postingPlan.updateCaptions(accountIds, caption, onlyEmpty);
+    return { ...snapshot(), updatedCount: result.updatedCount };
+  },
   updatePostingVideo: ({ id, ...changes }) => { postingPlan.updateItem(id, changes); return snapshot(); },
   movePostingVideo: ({ id, direction }) => { postingPlan.move(id, direction); return snapshot(); },
   removePostingVideo: id => { postingPlan.remove(id); return snapshot(); },
@@ -785,7 +852,7 @@ const handlers = {
     const account = getAccount(id);
     if (postingWorker.active.has(id)) throw new Error('Aguarde a publicação em andamento antes de editar a conta.');
     if (xAutomation.owns(id) || xAutomation.checking) throw new Error('Pare o X antes de editar esta conta.');
-    const changes = domain.accountChanges(input, store.data.proxies);
+    const changes = domain.accountChanges({ ...input, postingConnection: input.postingConnection ?? (input.proxyId ? account.postingConnection : 'direct') }, store.data.proxies);
     if (changes.platform !== account.platform && (changes.platform === 'facebook' || account.platform === 'facebook')) throw new Error('Páginas Facebook são vinculadas pelo login Facebook e não podem trocar de plataforma.');
     if (postingSchedule) {
       if (changes.platform !== 'instagram' || postingSchedule.mode !== 'fixed') throw new Error('Horários de postagem exigem uma conta Instagram.');
@@ -793,7 +860,8 @@ const handlers = {
     }
     const platformChanged = changes.platform !== account.platform;
     if (changes.proxyId !== account.proxyId || platformChanged) { ensureClosed(account); clearPrepared(id); account.diagnostic = undefined; }
-    if (changes.proxyId !== account.proxyId) changes.browserProfile = changes.proxyId && !store.data.accounts.some(item => item.id !== id && item.proxyId === changes.proxyId) ? 'proxy' : 'account';
+    else if (changes.postingConnection !== (account.postingConnection || (account.proxyId ? 'proxy' : 'direct'))) prepared.delete(`persist:posting-account-${id}`);
+    if (changes.proxyId !== account.proxyId) changes.browserProfile = !account.registration && changes.proxyId && !store.data.accounts.some(item => item.id !== id && item.proxyId === changes.proxyId) ? 'proxy' : 'account';
     if (changes.name !== account.name) changes.nameAuto = false;
     Object.assign(account, changes);
     if (postingSchedule) postingPlan.configure(id, postingSchedule);
@@ -831,7 +899,7 @@ const handlers = {
     await postingWorker.cleanupAccount(id).catch(() => { throw new Error('Não foi possível remover os vídeos temporários desta conta no Supabase. Tente excluir após restabelecer a conexão.'); });
     const openWindow = accountWindows.get(id);
     if (openWindow) await new Promise(resolve => { openWindow.once('closed', resolve); openWindow.destroy(); });
-    freeAccountWindows.get(id)?.close();
+    closeFreeAccountBrowsers(id);
     const ses = session.fromPartition(`persist:account-${id}`);
     await ses.clearData();
     await ses.clearAuthCache();
@@ -866,6 +934,14 @@ const handlers = {
     if (store.data.campaign) store.data.campaign.accountIds = store.data.campaign.accountIds.filter(item => item !== id);
     store.log(deleteLinkedProxy ? `Conta ${account.name} e proxy ${linkedProxy.name} excluídos. Logins e credenciais locais removidos.` : `Conta excluída: ${account.name}. Login local removido.`);
     return snapshot();
+  },
+  addInstagramCreatorProxy: async ({ line, protocol = 'http' }) => {
+    const parsed = require('./ui/proxy-format.js').parseProxyLine(line);
+    const before = new Set(store.data.proxies.map(proxy => proxy.id));
+    const next = await handlers.addProxy({ ...parsed, protocol, name: `Proxy ${parsed.host}:${parsed.port}`.slice(0, 120) });
+    const created = next.proxies.find(proxy => !before.has(proxy.id));
+    if (!created) throw new Error('Não foi possível identificar a proxy adicionada. Confira a lista de proxies.');
+    return { state: next, proxyId: created.id };
   },
   addProxy: async input => {
     const parsed = domain.proxy(input);
@@ -995,7 +1071,22 @@ const handlers = {
   },
   openAccount,
   openAccountBrowser,
-  closeAccountBrowser: id => { getAccount(id); freeAccountWindows.get(id)?.close(); return snapshot(); },
+  resetBrowserData: async id => {
+    const account = getAccount(id);
+    if (accountWindows.has(id)) throw new Error('Feche a janela da conta antes de limpar os dados.');
+    closeFreeAccountBrowsers(id);
+    const partitionKey = account.browserProfile === 'proxy' && account.proxyId
+      ? `persist:proxy-browser-${account.proxyId}` : `persist:account-${id}`;
+    const ses = session.fromPartition(partitionKey);
+    await ses.clearStorageData({ storages: ['cookies', 'localstorage', 'indexdb', 'serviceworkers', 'cachestorage'] });
+    await ses.clearAuthCache();
+    await ses.clearCache();
+    clearPrepared(id);
+    if (account.browserProfile === 'proxy' && account.proxyId) prepared.delete(`persist:proxy-browser-${account.proxyId}`);
+    store.log(`Dados do navegador de ${account.name} limpos. Faça login novamente.`);
+    return snapshot();
+  },
+  closeAccountBrowser: id => { getAccount(id); closeFreeAccountBrowsers(id); return snapshot(); },
   closeAccount: id => { getAccount(id); accountWindows.get(id)?.close(); return snapshot(); },
   testConnection,
   testProxy: id => testConnection(id, true),
@@ -1071,7 +1162,7 @@ async function boot() {
   automation = new Automation({ store, getWindow: id => { const win = accountWindows.get(id); return win && !win.isDestroyed() ? win : undefined; }, openAccount, onChange: () => { refreshAccountTitles(); if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('studio:automation', snapshot()); } });
   xAutomation = new XAutomation({ store, getWindow: id => accountWindows.get(id), openAccount, onChange: () => { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('studio:x-automation', snapshot()); } });
   mainWindow = new BrowserWindow({ width: 1320, height: 920, minWidth: 560, minHeight: 600, show: !smoke && !xReadOnly, title: 'Comment Studio', backgroundColor: '#f5f7fa', webPreferences: { preload: path.join(__dirname, 'preload.cjs'), contextIsolation: true, sandbox: true, nodeIntegration: false } });
-  postingWorker = new PostingWorker({ plan: postingPlan, storage: postingStorage, auth: metaAuth, facebookAuth, getFacebookTarget: pageId => store.data.accounts.find(a => a.platform === 'facebook' && a.facebookPageId === pageId && facebookAuth.status(a.id).connected), net, getConnection: prepareAccount, getAccount: id => store.data.accounts.find(a => a.id === id), onFailure: id => { if (id) lastErrors.set(id, 'Falha interna ao acessar a fila local. Reinicie o aplicativo antes de continuar.'); }, onChange: () => { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('studio:postings', snapshot()); } });
+  postingWorker = new PostingWorker({ plan: postingPlan, storage: postingStorage, auth: metaAuth, facebookAuth, getFacebookTarget: pageId => store.data.accounts.find(a => a.platform === 'facebook' && a.facebookPageId === pageId && facebookAuth.status(a.id).connected), net, getConnection: preparePostingAccount, getAccount: id => store.data.accounts.find(a => a.id === id), onFailure: id => { if (id) lastErrors.set(id, 'Falha interna ao acessar a fila local. Reinicie o aplicativo antes de continuar.'); }, onChange: () => { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('studio:postings', snapshot()); } });
   mediaProcessor = new MediaProcessor({ onProgress: progress => { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('studio:media-progress', progress); } });
   videoDownloader = new VideoDownloader({ executable: app.isPackaged ? binaryPath('yt-dlp') : path.join(root, 'vendor', 'yt-dlp.exe'), onProgress: progress => {
     if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('studio:download-progress', progress);
@@ -1080,6 +1171,9 @@ async function boot() {
       catch (error) { console.error('Falha ao atualizar fila após download:', error); }
     }
   } });
+  const collectInstagramInsights=createInstagramCollector({postingPlan,metaAuth,getAccount,preparePostingAccount,getAccounts:()=>store.data.accounts,makePublisher:connection=>new MetaPublisher({fetch:createProxyFetch(net,connection,{timeoutMs:30000}),version:metaAuth.settings().graphVersion})});
+  instagramCoordinator=new InstagramInsightsCoordinator({db:postingPlan.db,collect:collectInstagramInsights,onProgress:progress=>{if(mainWindow&&!mainWindow.isDestroyed())mainWindow.webContents.send('studio:insights-progress',progress);}});
+  instagramCoordinator.resume();
   mainWindow.setMenu(null);
   mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   mainWindow.webContents.on('will-navigate', event => event.preventDefault());
@@ -1091,11 +1185,11 @@ async function boot() {
         if (automation.isActive() && ['editAccount', 'deleteAccount', 'editProxy', 'deleteProxy', 'saveCampaign', 'closeAccount', 'testConnection', 'testProxy', 'checkCampaign'].includes(method)) throw new Error('Pare a campanha antes de alterar contas ou proxies.');
         return { ok: true, value: await handler(payload) };
       } catch (error) { return { ok: false, error: ['openAccount', 'addProxy'].includes(method) && !(error instanceof Error) ? 'Falha na operação.' : (error.message || 'Falha na operação.') }; } };
-      if (['state', 'postingProfilePicture', 'postingCoverPreview', 'testConnection', 'testProxy', 'openGeoSource', 'pickMediaVideos', 'pickPostingVideoFolder', 'pickMediaCover', 'pickMediaImages', 'pickMediaOutput', 'startMediaJob', 'cancelMediaJob', 'inspectDownloadLinks', 'startDownloadJob', 'cancelDownloadJob', 'openMediaOutput'].includes(method)) return run();
+      if (['state', 'instagramOfficialMetrics', 'refreshInstagramInsights', 'postingProfilePicture', 'postingCoverPreview', 'testConnection', 'testProxy', 'openGeoSource', 'pickMediaVideos', 'pickPostingVideoFolder', 'pickMediaCover', 'pickMediaImages', 'pickMediaOutput', 'startMediaJob', 'cancelMediaJob', 'inspectDownloadLinks', 'startDownloadJob', 'cancelDownloadJob', 'openMediaOutput'].includes(method)) return run();
       const result = mutationQueue.then(run); mutationQueue = result.then(() => undefined); return result;
     });
   }
-  mainWindow.on('close', () => { clearInterval(postingFolderSyncTimer); xAutomation?.stop(); postingWorker?.stop(); mediaProcessor?.cancel(); videoDownloader?.cancel(); tlsProxy.stop(); for (const win of accountWindows.values()) win.close(); for (const win of freeAccountWindows.values()) win.close(); for (const win of proxyBrowserWindows.values()) win.close(); });
+  mainWindow.on('close', () => { instagramCoordinator?.stop(); clearInterval(postingFolderSyncTimer); xAutomation?.stop(); postingWorker?.stop(); mediaProcessor?.cancel(); videoDownloader?.cancel(); tlsProxy.stop(); for (const win of accountWindows.values()) win.close(); for (const id of freeAccountWindows.keys()) closeFreeAccountBrowsers(id); for (const win of proxyBrowserWindows.values()) win.close(); });
   await mainWindow.loadFile(path.join(__dirname, 'ui', 'index.html'));
   if (!smoke && !xReadOnly) {
     const scan = () => {
@@ -1123,8 +1217,8 @@ async function boot() {
   }
   if (smoke) {
     try {
-      await require('../tests/desktop.cjs').run({ mainWindow, handlers, prepareAccount, openAccount, dataDir, store, automation });
-      fs.writeFileSync(path.join(root, '.smoke', 'result.json'), JSON.stringify({ ok: true, dataDir }, null, 2));
+      await require('../tests/desktop.cjs').run({ mainWindow, handlers, prepareAccount, openAccount, dataDir, store, automation, dashboardOnly:dashboardSmoke });
+      fs.writeFileSync(path.join(root, '.smoke', dashboardSmoke?'dashboard-integration-result.json':'result.json'), JSON.stringify({ ok: true, dataDir }, null, 2));
       app.exit(0);
     } catch (error) { fs.writeFileSync(path.join(root, '.smoke', 'result.json'), JSON.stringify({ ok: false, message: error.stack }, null, 2)); app.exit(1); }
   }

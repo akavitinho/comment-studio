@@ -45,6 +45,24 @@ function stealthPatchSource(profile) {
     }
   } catch(e) {}
 
+  // ── 1b. Remove Electron/Node.js globals that leak identity ─────────
+  try {
+    // Electron contextBridge internals
+    delete window.__electron_contextBridge;
+    delete window.__electronLog;
+    delete window.electron;
+    // Node.js globals that Electron may expose despite sandbox
+    if (typeof window.process !== 'undefined' && window.process.versions) {
+      delete window.process;
+    }
+    if (typeof window.require === 'function') { delete window.require; }
+    if (typeof window.module !== 'undefined') { delete window.module; }
+    if (typeof window.exports !== 'undefined' && window.exports !== window) { delete window.exports; }
+    if (typeof window.Buffer !== 'undefined') { delete window.Buffer; }
+    if (typeof window.global !== 'undefined' && window.global === window) { /* ok */ }
+    else if (typeof window.global !== 'undefined') { delete window.global; }
+  } catch(e) {}
+
   // ── 2. window.chrome stub ───────────────────────────────────────────
   try {
     var existingRuntime = window.chrome && window.chrome.runtime ? window.chrome.runtime : null;

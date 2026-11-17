@@ -7,6 +7,23 @@ app.whenReady().then(async () => {
     await window.loadFile(path.join(__dirname, '..', 'src', 'ui', 'index.html'));
     await window.webContents.executeJavaScript("document.querySelector('[data-page=postings]').click()");
     await window.webContents.executeJavaScript("new Promise(resolve => { if (document.body.dataset.ready) resolve(); else setTimeout(resolve, 250); })");
+    const routeChoices = await window.webContents.executeJavaScript(`(() => {
+      document.querySelector('[data-platform=instagram] button').click();
+      document.querySelector('#open-account-form').click();
+      const form = document.querySelector('#account-form');
+      const connection = document.querySelector('#account-connection-type');
+      connection.value = 'proxy'; connection.dispatchEvent(new Event('change'));
+      const proxy = form.elements.proxyId; proxy.append(new Option('Proxy disponível', 'proxy-available')); proxy.value = 'proxy-available'; proxy.dispatchEvent(new Event('change'));
+      form.elements.postingConnection.value = 'direct';
+      const accountChoice = !document.querySelector('#account-posting-connection-field').hidden && !form.elements.postingConnection.querySelector('[value=proxy]').disabled && form.elements.postingConnection.value === 'direct';
+      document.querySelector('#account-dialog').close();
+      const quick = document.querySelector('#posting-account-form');
+      quick.elements.proxyId.value = 'proxy-test'; quick.elements.proxyId.dispatchEvent(new Event('change'));
+      quick.elements.postingConnection.value = 'proxy';
+      const quickChoice = !quick.elements.postingConnection.querySelector('[value=proxy]').disabled && quick.elements.postingConnection.value === 'proxy';
+      return { accountChoice, quickChoice };
+    })()`);
+    assert.deepEqual(routeChoices, { accountChoice: true, quickChoice: true });
     const result = await window.webContents.executeJavaScript(`(async () => {
       document.querySelector('[data-posting-tab=schedule]').click();
       const legacy = document.querySelector('.posting-legacy-note')?.textContent.includes('agenda antiga');

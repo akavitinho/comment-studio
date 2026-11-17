@@ -2,32 +2,69 @@
   const $ = selector => document.querySelector(selector);
   const el = (tag, label, className) => { const node = document.createElement(tag); if (label !== undefined) node.textContent = label; if (className) node.className = className; return node; };
   let current = { accounts: [], postings: { items: [], schedules: [] }, facebookMetrics: [] };
-  let pending = null, selectedFile = '';
+  let pending = null, external = null, selectedFile = '';
   const feedback = (message, error = false) => { const node = $('#facebook-feedback'); node.textContent = message; node.hidden = !message; node.classList.toggle('error', error); };
   const apply = next => { if (window.applyStudioState) window.applyStudioState(next); else window.renderFacebook(next); };
   const run = async action => { try { feedback(''); const next = await action(); if (next?.accounts) apply(next); return next; } catch (error) { feedback(error.message, true); return null; } };
   const button = (label, action, kind = 'secondary') => { const node = el('button', label, kind); node.type = 'button'; node.addEventListener('click', async () => { node.disabled = true; try { await run(action); } finally { node.disabled = false; } }); return node; };
   const pages = () => current.accounts.filter(account => account.platform === 'facebook');
   const selectOptions = (select, accounts) => { const saved = select.value; select.replaceChildren(...accounts.map(account => new Option(account.name, account.id))); if (accounts.some(account => account.id === saved)) select.value = saved; };
+  const syncPostingConnection = () => {
+    const select = $('#facebook-posting-connection');
+    select.querySelector('[value="proxy"]').disabled = !$('#facebook-login-proxy').value;
+    if (!$('#facebook-login-proxy').value) select.value = 'direct';
+  };
+  $('#facebook-login-proxy').addEventListener('change', syncPostingConnection);
   $('#facebook-storage-form').addEventListener('submit', async event => {
     event.preventDefault();
     const form = event.currentTarget;
     const next = await run(() => window.studio.savePostingStorage(Object.fromEntries(new FormData(form))));
     if (next) { form.elements.publishableKey.value = ''; feedback('Conexão Supabase salva.'); }
   });
-  $('#facebook-connect').addEventListener('click', async () => {
-    const result = await run(() => window.studio.connectFacebook({ proxyId: $('#facebook-login-proxy').value || null }));
-    if (!result?.pages) return;
-    pending = { flowId: result.flowId, proxyId: $('#facebook-login-proxy').value || null };
+  const showPageChoices = (result, settings) => {
+    pending = { flowId: result.flowId, ...settings };
     const choices = $('#facebook-page-options'); choices.replaceChildren();
     for (const page of result.pages) { const label = el('label'); const check = el('input'); check.type = 'checkbox'; check.value = page.id; check.checked = true; label.append(check, document.createTextNode(` ${page.name}${page.insightsGranted ? '' : ' · métricas indisponíveis'}`)); choices.append(label); }
     $('#facebook-page-choice').hidden = false;
+  };
+  $('#facebook-connect').addEventListener('click', async () => {
+    const settings = { proxyId: $('#facebook-login-proxy').value || null, postingConnection: $('#facebook-posting-connection').value };
+    const result = await run(() => window.studio.connectFacebook({ proxyId: settings.proxyId }));
+    if (result?.pages) showPageChoices(result, settings);
+  });
+  const copyFacebookLoginLink = async (settings = { proxyId: $('#facebook-login-proxy').value || null, postingConnection: $('#facebook-posting-connection').value }) => {
+    $('#facebook-login-proxy').value = settings.proxyId || '';
+    syncPostingConnection();
+    $('#facebook-posting-connection').value = settings.postingConnection || 'direct';
+    const result = await run(() => window.studio.copyFacebookLoginLink({ proxyId: settings.proxyId }));
+    if (!result?.flowId) return;
+    external = { ...result, settings };
+    $('#facebook-external-form').reset();
+    $('#facebook-external-form').hidden = false;
+    feedback('Link copiado. Cole no perfil desejado do Dolphin.');
+  };
+  window.startFacebookDolphin = copyFacebookLoginLink;
+  $('#facebook-copy-link').addEventListener('click', () => copyFacebookLoginLink());
+  $('#facebook-external-form').addEventListener('submit', async event => {
+    event.preventDefault();
+    if (!external) return;
+    const form = event.currentTarget;
+    const result = await run(() => window.studio.completeFacebookExternalLogin({ flowId: external.flowId, callbackUrl: form.elements.callbackUrl.value.trim() }));
+    if (!result?.pages) return;
+    showPageChoices(result, external.settings);
+    external = null; form.reset(); form.hidden = true;
   });
   $('#facebook-bind').addEventListener('click', async () => {
     if (!pending) return;
     const pageIds = [...$('#facebook-page-options').querySelectorAll('input:checked')].map(input => input.value);
+    const previousIds = new Set(pages().map(page => page.id));
     const next = await run(() => window.studio.bindFacebookPages({ ...pending, pageIds }));
-    if (next) { pending = null; $('#facebook-page-choice').hidden = true; feedback(`${pageIds.length} Página(s) conectada(s).`); }
+    if (next) {
+      pending = null; $('#facebook-page-choice').hidden = true;
+      feedback(`${pageIds.length} Página(s) conectada(s). Configure os horários e adicione posts à fila.`);
+      const first = pages().find(page => !previousIds.has(page.id) && pageIds.includes(page.facebookPageId)) || pages().find(page => pageIds.includes(page.facebookPageId));
+      if (first) window.openPostingAccount?.(first);
+    }
   });
   $('#facebook-compose [name=type]').addEventListener('change', () => { selectedFile = ''; $('#facebook-file-name').textContent = 'Nenhum arquivo selecionado'; $('#facebook-file-row').hidden = $('#facebook-compose [name=type]').value === 'text'; });
   $('#facebook-pick-file').addEventListener('click', async () => {
@@ -50,6 +87,11 @@
     form.elements.timeZone.value = config?.timeZone || 'America/Sao_Paulo';
   }
   $('#facebook-schedule [name=accountId]').addEventListener('change', loadSchedule);
+  window.focusFacebookPage = accountId => {
+    for (const form of [$('#facebook-compose'), $('#facebook-schedule')]) form.elements.accountId.value = accountId;
+    loadSchedule();
+    $('#facebook-schedule').scrollIntoView({ block: 'start' });
+  };
   $('#facebook-schedule').addEventListener('submit', async event => {
     event.preventDefault(); const form = event.currentTarget;
     const times = form.elements.times.value.split(',').map(value => value.trim()).filter(Boolean);
@@ -110,6 +152,7 @@
     const proxy = $('#facebook-login-proxy'), previous = proxy.value;
     proxy.replaceChildren(new Option('Direta', ''), ...(state.proxies || []).map(item => new Option(item.name, item.id)));
     proxy.value = previous;
+    syncPostingConnection();
     for (const form of [$('#facebook-compose'), $('#facebook-schedule')]) selectOptions(form.elements.accountId, pages());
     renderQueues(); renderDashboard();
   };

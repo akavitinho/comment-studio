@@ -10,6 +10,7 @@
     "test": "node --test tests/*.test.cjs",
     "test:dom": "electron tests/page-controls.cjs",
     "test:desktop": "electron . --smoke",
+    "test:instagram-creator": "electron tests/instagram-creator-desktop.cjs",
     "test:x:read-only": "electron . --check-x-readonly",
     "dist:win": "node scripts/stage-runtime.cjs && node scripts/protect-build.cjs && electron-builder --win nsis --x64",
     "test:protected": "node --test build/protected-app/tests/*.test.cjs"

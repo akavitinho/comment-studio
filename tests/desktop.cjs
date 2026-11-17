@@ -4,12 +4,14 @@ const path = require('node:path');
 const { safeStorage, net, session } = require('electron');
 const { Store } = require('../src/store.cjs');
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
-async function run({ mainWindow, handlers, prepareAccount, openAccount, dataDir, store, automation }) {
-  await require('./page-controls.cjs').run();
-  await require('./background.cjs').run();
+async function run({ mainWindow, handlers, prepareAccount, openAccount, dataDir, store, automation, dashboardOnly=false }) {
+  if(!dashboardOnly)await require('./page-controls.cjs').run();
+  if(!dashboardOnly)await require('./background.cjs').run();
   const evaluate = code => mainWindow.webContents.executeJavaScript(code).catch(error => { throw new Error(`UI test failed (${code.slice(0, 90)}): ${error.message}`); });
   for (let n = 0; n < 50; n++) { if (await evaluate('document.body.dataset.ready === "true"')) break; await wait(100); }
   assert.equal(await evaluate('document.body.dataset.ready'), 'true', 'interface inicializada');
+  if(!dashboardOnly)await require('./instagram-creator-ui.cjs').run({ mainWindow, handlers, dataDir });
+  if(!dashboardOnly)await require('./instagram-creator-proxy-ui.cjs').run({ mainWindow, handlers, store, prepareAccount });
   assert.equal(await evaluate(`document.querySelector('.sidebar-footer small').textContent`), `Versão ${require('../package.json').version}`);
   assert.equal(await evaluate('typeof window.studio.state'), 'function', 'bridge disponível no painel');
   assert.equal(await evaluate('typeof window.studio.instagramAccountInsights'), 'function', 'consulta de totais por intervalo disponível');
@@ -22,67 +24,31 @@ async function run({ mainWindow, handlers, prepareAccount, openAccount, dataDir,
     const original = await window.studio.state();
     const at = new Date().toISOString();
     window.applyStudioState({ ...original, accounts: [...original.accounts, { id: 'tiktok-metrics-fixture', platform: 'tiktok', name: 'TikTok Teste', handle: 'creator', tiktokAnalytics: { connected: true, username: 'creator' } }], tiktokInsights: { videos: [{ account_id: 'tiktok-metrics-fixture', video_id: '123', title: 'Vídeo teste', created_at: at, fetched_at: at, views: 125, likes: 12, comments: 3, shares: 2 }], history: [{ account_id: 'tiktok-metrics-fixture', video_id: '123', fetched_at: new Date(Date.now() - 120000).toISOString(), views: 100, likes: 10, comments: 2, shares: 1 }, { account_id: 'tiktok-metrics-fixture', video_id: '123', fetched_at: at, views: 125, likes: 12, comments: 3, shares: 2 }] }, campaignAnalytics: [{ platform: 'tiktok', accountId: 'tiktok-metrics-fixture', hour: at, comments: 2, replies: 0, likes: 0, uncertain: 1 }] });
-    document.querySelector('#dashboard-platform').value = 'tiktok'; document.querySelector('#dashboard-platform').dispatchEvent(new Event('change'));
+    document.querySelector('.nav-group[data-platform="tiktok"] button').click();
     const valid = !document.querySelector('#dashboard-tiktok-panel').hidden && document.querySelector('#dashboard-tiktok-summary').textContent.includes('+25 visualizações') && document.querySelector('#dashboard-tiktok-videos').textContent.includes('Vídeo teste') && !document.querySelector('#dashboard-refresh-insights').disabled && document.querySelector('#dashboard-campaign-stats').textContent.includes('Comentários TikTok2') && document.querySelector('#dashboard-campaign-accounts').textContent.includes('TikTok Teste');
-    window.applyStudioState(original); document.querySelector('#dashboard-platform').value = 'instagram'; document.querySelector('#dashboard-platform').dispatchEvent(new Event('change'));
+    window.applyStudioState(original); document.querySelector('.nav-group[data-platform="instagram"] button').click();
     return valid;
   })()`), true, 'dashboard mostra crescimento TikTok após duas leituras');
   assert.equal(await evaluate(`document.querySelectorAll('.nav-group .nav-item').length === 0 && document.querySelectorAll('.nav-general [data-page="campaign"], .nav-general [data-page="x"]').length === 2`), true, 'campanhas ficam em Geral e redes não possuem submenus');
+  // Official account totals must not be inferred from local Reel snapshots.
+  // Populated cards, chart keyboard controls and comparisons are exercised by dashboard-official-ui.cjs.
   assert.equal(await evaluate(`(async () => {
-    const original = await window.studio.state();
-    const at = new Date().toISOString();
-    const account = { id: 'dashboard-fixture', platform: 'instagram', name: 'Perfil painel', handle: 'painel', meta: { connected: true, insightsGranted: true } };
-    const item = { id: 'dashboard-reel', account_id: account.id, account_name: account.name, file: 'video.mp4', status: 'published', media_id: 'meta-fixture', published_at: at, created_at: at };
-    const fixture = { ...original, accounts: [...original.accounts, account], postings: { ...original.postings, items: [item], schedules: [], insights: [{ item_id: item.id, media_id: item.media_id, views: 130, reach: 60, fetched_at: at }], insightHistory: [{ item_id: item.id, views: 100, reach: null, fetched_at: new Date(Date.now() - 120000).toISOString() }, { item_id: item.id, views: 130, reach: 60, fetched_at: at }] } };
-    window.applyStudioState(fixture);
+    window.instagramDashboard.setAuto(false);
+    document.querySelector('.nav-group[data-platform="instagram"] button').click();
     document.querySelector('[data-page="dashboard"]').click();
-    const cards = [...document.querySelectorAll('#dashboard-metrics .dashboard-metric strong')].map(node => node.textContent);
-    const publicationLine = document.querySelector('#dashboard-chart .insights-publication-line');
-    const valid = cards[0] === '30' && cards[1] === '—' && cards[2] === '1' && document.querySelectorAll('#dashboard-chart svg circle').length === 2 && publicationLine?.getAttribute('points') && document.querySelector('.insights-chart-legend').textContent.includes('Reels postados') && document.querySelector('#dashboard-queue').textContent.includes('Instagram') && document.querySelector('#dashboard-hourly').textContent.includes('Perfil painel') && document.querySelector('#dashboard-hourly').textContent.includes('+30');
-    const clarity = document.querySelector('#dashboard-metrics .dashboard-metric span').textContent === 'Novas visualizações no período'
-      && document.querySelector('#dashboard-metrics .dashboard-metric small').textContent.includes('Última coleta:')
-      && document.querySelector('#dashboard-refresh-status').textContent.includes('Última coleta:')
-      && document.querySelector('#dashboard-metrics .dashboard-metric .insights-change').textContent === 'Sem comparação';
-    document.querySelector('#dashboard-chart svg circle').focus();
-    const summary = document.querySelector('#dashboard-chart .analytics-tooltip').textContent.includes('30 visualizações');
-    const publicationToggle = document.querySelector('.insights-legend-publications input');
-    publicationToggle.checked = false; publicationToggle.dispatchEvent(new Event('change'));
-    const hiddenLine = !document.querySelector('#dashboard-chart .insights-publication-line') && !document.querySelector('#dashboard-chart .insights-publication-axis');
-    publicationToggle.checked = true; publicationToggle.dispatchEvent(new Event('change'));
-    const restoredLine = Boolean(document.querySelector('#dashboard-chart .insights-publication-line'));
-    const advanced = document.querySelector('.dashboard-filter-details');
-    advanced.open = true; document.querySelector('#dashboard-group').value = '3'; advanced.open = false; advanced.open = true;
-    const filterPreserved = document.querySelector('#dashboard-group').value === '3';
-    document.querySelector('#dashboard-group').value = 'auto'; document.querySelector('#dashboard-group').dispatchEvent(new Event('change'));
-    const reelSort = document.querySelector('#dashboard-sort');
-    reelSort.value = 'views-hour'; reelSort.dispatchEvent(new Event('change'));
-    const hourlyTop = document.querySelector('#dashboard-reels').textContent.includes('30 views')
-      && document.querySelector('#dashboard-reels').closest('section').querySelector('h2').textContent.includes('última hora');
-    reelSort.value = 'views'; reelSort.dispatchEvent(new Event('change'));
-    const filter = document.querySelector('#dashboard-account'); filter.value = account.id; filter.dispatchEvent(new Event('change'));
-    const filtered = document.querySelector('#dashboard-metrics .dashboard-metric strong').textContent === '30';
-    const period = document.querySelector('#dashboard-period'); period.value = 'custom'; period.dispatchEvent(new Event('change'));
-    const customVisible = !document.querySelector('#dashboard-custom-dates').hidden;
-    const yesterday = new Date(Date.now() - 86400000); const date = yesterday.getFullYear() + '-' + String(yesterday.getMonth() + 1).padStart(2,'0') + '-' + String(yesterday.getDate()).padStart(2,'0');
-    document.querySelector('#dashboard-from').value = date; document.querySelector('#dashboard-to').value = date;
+    const query=window.instagramOfficialRanges();
+    const result=await window.studio.instagramOfficialMetrics({accountIds:[],from:query[1].from,to:query[0].to});
+    if(result.metrics.length||result.authorizedIds.length)return false;
+    const period=document.querySelector('#dashboard-period');period.value='custom';period.dispatchEvent(new Event('change'));
+    document.querySelector('#dashboard-from').value='2026-11-18';document.querySelector('#dashboard-to').value='2026-11-17';
     document.querySelector('#dashboard-to').dispatchEvent(new Event('change'));
-    const periodFiltered = document.querySelectorAll('#dashboard-metrics .dashboard-metric strong')[2].textContent === '0' && document.querySelector('#dashboard-metrics .dashboard-metric strong').textContent === '—';
-    period.value = '7'; period.dispatchEvent(new Event('change'));
-    document.querySelector('#dashboard-platform').value = 'tiktok'; document.querySelector('#dashboard-platform').dispatchEvent(new Event('change'));
-    const unavailable = document.querySelector('#dashboard-metrics .dashboard-metric strong').textContent === '—' && document.querySelector('#dashboard-chart').textContent.includes('Aguardando');
-    document.querySelector('#dashboard-platform').value = 'instagram'; document.querySelector('#dashboard-platform').dispatchEvent(new Event('change'));
-    window.applyStudioState({ ...fixture, accounts: [...original.accounts, { ...account, error: 'Falha de conexão' }], postings: { ...fixture.postings, items: [item, { ...item, id: 'dashboard-issue', status: 'attention' }] } });
-    const attentionCard = document.querySelectorAll('#dashboard-metrics .dashboard-metric')[5];
-    attentionCard.click();
-    const attentionDialog = document.querySelector('.insights-attention-dialog');
-    const attentionReasons = attentionCard.querySelector('strong').textContent === '1' && attentionDialog.open && attentionDialog.textContent.includes('Falha de conexão') && attentionDialog.textContent.includes('Publicação precisa de atenção');
-    attentionDialog.querySelector('.insights-attention-actions button').click();
-    const accountDestination = !document.querySelector('[data-panel="accounts"]').hidden && document.querySelector('#account-search').value === account.handle;
-    window.applyStudioState(original); document.querySelector('[data-page="campaign"]').click();
-    const checks = { valid, clarity, summary, hiddenLine, restoredLine, filterPreserved, hourlyTop, filtered, customVisible, periodFiltered, unavailable, attentionReasons, accountDestination };
-    if (Object.values(checks).some(value => !value)) throw new Error(JSON.stringify(checks));
-    return true;
-  })()`), true, 'dashboard filtra conta, plataforma e período sem inventar alcance ausente');
+    const invalid=!document.querySelector('#dashboard-invalid-range').hidden&&document.querySelector('#dashboard-refresh-insights').disabled;
+    period.value='7';period.dispatchEvent(new Event('change'));
+    await new Promise(resolve=>setTimeout(resolve,200));
+    const empty=[...document.querySelectorAll('.official-cards strong')].every(node=>node.textContent==='—');
+    return invalid&&empty&&document.querySelector('.official-timezone').textContent.includes('Brasília');
+  })()`),true,'dashboard oficial valida períodos e não inventa totais sem contas');
+  if(dashboardOnly)return;
   assert.equal(await evaluate(`(async () => {
     const original = await window.studio.state();
     const account = { id: 'posting-ui-fixture', platform: 'instagram', name: 'Perfil teste', handle: 'fila.teste' };
@@ -210,7 +176,11 @@ async function run({ mainWindow, handlers, prepareAccount, openAccount, dataDir,
   fs.writeFileSync(coverPath, Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/+fQAAAAASUVORK5CYII=', 'base64'));
   const savedCover = handlers.savePostingMediaSettings({ accountId: instagram.id, cover: coverPath });
   assert.equal(savedCover.accounts.some(account => account.id === instagram.id), true, 'salvar capa retorna estado completo para atualizar o cartão');
-  assert.equal(savedCover.postings.mediaSettings.find(item => item.account_id === instagram.id)?.cover, coverPath);
+  const retainedCover = savedCover.postings.mediaSettings.find(item => item.account_id === instagram.id);
+  assert.notEqual(retainedCover?.cover, coverPath);
+  assert.equal(retainedCover?.cover_name, 'test-cover.png');
+  fs.unlinkSync(coverPath);
+  assert.equal(fs.existsSync(retainedCover.cover), true);
   assert.match(handlers.postingCoverPreview({ accountId: instagram.id }), /^data:image\/png;base64,/);
   const folderPath = path.join(dataDir, 'posting-folder'); fs.mkdirSync(folderPath);
   const selectedFolder = handlers.selectPostingFolder({ accountId: instagram.id, folder: folderPath });

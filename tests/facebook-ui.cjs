@@ -16,11 +16,14 @@ app.whenReady().then(async () => {
       const dashboard = !document.querySelector('[data-panel=facebook-dashboard]').hidden && document.querySelector('#facebook-dashboard-pages').textContent.includes('10');
       document.querySelector('[data-page=postings]').click();
       const postings = !document.querySelector('[data-panel=facebook-postings]').hidden && document.querySelector('#facebook-queues').textContent.includes('Texto de teste') && document.querySelector('#facebook-compose [name=accountId]').value === 'fb-test';
+      const loginProxy = document.querySelector('#facebook-login-proxy'); loginProxy.value = 'proxy-test'; loginProxy.dispatchEvent(new Event('change'));
+      const postingConnection = document.querySelector('#facebook-posting-connection'); postingConnection.value = 'direct';
+      const routeChoice = !postingConnection.querySelector('[value=proxy]').disabled && postingConnection.value === 'direct';
       document.querySelector('[data-platform=instagram] button').click(); document.querySelector('[data-page=postings]').click();
       const handoff = document.querySelector('[data-panel=postings]').textContent.includes('Postar no Facebook');
-      return { dashboard, postings, handoff };
+      return { dashboard, postings, handoff, routeChoice };
     })()`);
-    assert.deepEqual(result, { dashboard: true, postings: true, handoff: true });
+    assert.deepEqual(result, { dashboard: true, postings: true, handoff: true, routeChoice: true });
     console.log('Facebook navigation and independent queue passed.');
   } catch (error) { console.error('Facebook UI failed:', error); process.exitCode = 1; }
   finally { win.destroy(); app.exit(process.exitCode || 0); }

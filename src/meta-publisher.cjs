@@ -167,7 +167,14 @@ class MetaPublisher {
   async metricValues(route, token, metrics, params = {}, options = {}) {
     const read = data => Object.fromEntries(metrics.map(name => {
       const metric = (data.data || []).find(entry => entry.name === name);
-      const value = metric?.total_value?.value ?? metric?.values?.at(-1)?.value;
+      let value = metric?.total_value?.value ?? (params.metric_type === 'total_value' ? null : metric?.values?.at(-1)?.value);
+      if(params.metric_type==='total_value'){
+        const timestamp=value=>{if(value==null)return null;const at=typeof value==='number'?value*1000:Date.parse(value);return Number.isFinite(at)?at:null;};
+        const from=timestamp(metric?.start_time??metric?.total_value?.start_time),to=timestamp(metric?.end_time??metric?.total_value?.end_time);
+        const mismatch=Boolean(metric && ((metric.period&&metric.period!==params.period)||(from!=null&&from!==params.since*1000)||(to!=null&&to!==params.until*1000)||!metric.total_value));
+        options.onEvidence?.(name,{period:metric?.period||null,reportedFrom:from,reportedTo:to,status:mismatch?'incompatible':from!=null&&to!=null?'confirmed':'requested',shape:metric?.total_value?'total_value':metric?.values?'time_series':'missing'});
+        if(mismatch)value=null;
+      }
       return [name, typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null];
     }));
     const available = metrics.filter(name => !options.unsupported?.has(name) && !options.deferred?.has(name));
@@ -196,13 +203,23 @@ class MetaPublisher {
     const message = String(error.metaMessage || '').toLowerCase();
     return error.metaCode === 100 && !error.transient && message.includes(metric.toLowerCase()) && /invalid|unsupported|not available|not supported|não dispon[ií]vel|inv[aá]lid/.test(message);
   }
-  accountMetrics(igId, token, from, to, options = {}) {
-    return this.metricValues(`${igId}/insights`, token, ['views','reach','accounts_engaged','total_interactions','profile_views'], {
+  async retryInsights(operation) {
+    for(let attempt=0;;attempt++){
+      try{return await operation();}catch(error){
+        if(attempt>=2||error.retryAfterMinutes||[4,17,32,613,80002,190,102,200].includes(error.metaCode)||!(error.transient||error.httpStatus>=500))throw error;
+        await this.wait(1000*2**attempt);
+      }
+    }
+  }
+  async accountMetrics(igId, token, from, to, options = {}) {
+    const evidence={};
+    const values=await this.retryInsights(()=>this.metricValues(`${igId}/insights`, token, ['views','reach','accounts_engaged','total_interactions','profile_views'], {
       period: 'day', metric_type: 'total_value', since: Math.floor(from / 1000), until: Math.floor(to / 1000)
-    }, options);
+    }, {...options,onEvidence:(metric,value)=>{evidence[metric]=value;options.onEvidence?.(metric,value);}}));
+    Object.defineProperty(values,'evidence',{value:evidence});return values;
   }
   mediaMetrics(mediaId, token, options = {}) {
-    return this.metricValues(`${mediaId}/insights`, token, ['views','reach','likes','comments','shares','saved','ig_reels_avg_watch_time','ig_reels_video_view_total_time'], {}, options);
+    return this.retryInsights(()=>this.metricValues(`${mediaId}/insights`, token, ['views','reach','likes','comments','shares','saved','ig_reels_avg_watch_time','ig_reels_video_view_total_time'], {}, options));
   }
 }
 module.exports = { MetaPublisher };

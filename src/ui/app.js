@@ -52,13 +52,73 @@ let historyFilter = 'all';
 let historyPage = 1;
 let historyPageSize = 10;
 let dashboardRefreshing = false;
-let dashboardBackgroundRefreshing = false;
-let dashboardCompletedRefreshId = '';
 let dashboardAutoTimer = null;
 let dashboardAutoRun = false;
 let dashboardRefreshMessage = '';
-const pageNames = { dashboard: 'Dashboard', campaign: 'Campanha TikTok', x: 'Campanha Twitter (X)', accounts: 'Contas', proxies: 'Proxies', media: 'Preparar mídia', postings: 'Postagens Instagram', history: 'Histórico' };
+const pageNames = { dashboard: 'Dashboard', campaign: 'Campanha TikTok', x: 'Campanha Twitter (X)', creator: 'Criar contas Instagram', accounts: 'Contas', proxies: 'Proxies', media: 'Preparar mídia', postings: 'Postagens Instagram', history: 'Histórico' };
 const accountForm = $('#account-form');
+let instagramLinkFlowId = null, instagramLinkExpiresAt = 0, instagramLinkTimer = null;
+function stopInstagramLinkPolling() { if (instagramLinkTimer) clearTimeout(instagramLinkTimer); instagramLinkTimer = null; }
+function closeInstagramLink() {
+  const flowId = instagramLinkFlowId;
+  instagramLinkFlowId = null; stopInstagramLinkPolling();
+  if ($('#instagram-link-dialog').open) $('#instagram-link-dialog').close();
+  if (flowId) void window.studio.cancelInstagramAccountLink(flowId).catch(() => {});
+}
+$('#instagram-link-close').addEventListener('click', closeInstagramLink);
+$('#instagram-link-cancel').addEventListener('click', closeInstagramLink);
+$('#instagram-link-dialog').addEventListener('close', () => { if (instagramLinkFlowId) closeInstagramLink(); });
+$('#instagram-link-copy').addEventListener('click', async () => {
+  if (!instagramLinkFlowId) return;
+  try { await window.studio.copyInstagramAccountLink(instagramLinkFlowId); notify('Link copiado novamente.'); }
+  catch (error) { $('#instagram-link-status').textContent = error.message; }
+});
+async function pollInstagramLink(flowId) {
+  if (instagramLinkFlowId !== flowId) return;
+  try {
+    const result = await window.studio.pollInstagramAccountLink(flowId);
+    if (instagramLinkFlowId !== flowId) return;
+    if (result.status === 'connected') {
+      instagramLinkFlowId = null; stopInstagramLinkPolling();
+      state = result.state; render(); $('#instagram-link-dialog').close();
+      const account = state.accounts.find(item => item.id === flowId);
+      if (account) window.openPostingAccount(account);
+      else notify('Conta Instagram conectada.');
+      return;
+    }
+    if (result.status === 'failed') { $('#instagram-link-status').textContent = `${result.message} Feche esta janela e inicie outro cadastro.`; $('#instagram-link-copy').disabled = true; stopInstagramLinkPolling(); return; }
+    $('#instagram-link-status').textContent = 'Aguardando autorização…';
+  } catch (error) {
+    if (instagramLinkFlowId !== flowId) return;
+    $('#instagram-link-status').textContent = error.message;
+    if (Date.now() >= instagramLinkExpiresAt) { $('#instagram-link-copy').disabled = true; stopInstagramLinkPolling(); return; }
+  }
+  if (instagramLinkFlowId === flowId) instagramLinkTimer = setTimeout(() => pollInstagramLink(flowId), 2500);
+}
+function showInstagramLinkWaiting(result) {
+  if (instagramLinkFlowId) closeInstagramLink();
+  instagramLinkFlowId = result.flowId; instagramLinkExpiresAt = Date.parse(result.expiresAt);
+  $('#instagram-link-status').textContent = 'Aguardando autorização…';
+  $('#instagram-link-copy').disabled = false;
+  $('#instagram-link-dialog').showModal();
+  instagramLinkTimer = setTimeout(() => pollInstagramLink(result.flowId), 1500);
+}
+let instagramExternalAccountId = null;
+$('#instagram-external-close').addEventListener('click', () => $('#instagram-external-dialog').close());
+$('#instagram-external-cancel').addEventListener('click', () => $('#instagram-external-dialog').close());
+$('#instagram-external-form').addEventListener('submit', async event => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const submit = form.querySelector('[type="submit"]');
+  submit.disabled = true;
+  $('#instagram-external-error').hidden = true;
+  try {
+    const next = await window.studio.completeInstagramExternalLogin({ accountId: instagramExternalAccountId, callbackUrl: form.elements.callbackUrl.value.trim() });
+    if (next?.accounts) { state = next; render(); }
+    form.reset(); $('#instagram-external-dialog').close(); notify(next?.metaConnectionCancelled ? 'Vínculo do perfil cancelado.' : 'Conexão Instagram concluída.');
+  } catch (error) { $('#instagram-external-error').textContent = error.message; $('#instagram-external-error').hidden = false; }
+  finally { submit.disabled = false; }
+});
 const proxyForm = $('#proxy-form');
 // O mesmo diálogo de proxy atende a página Proxies e o cadastro de conta.
 document.body.append($('#proxy-dialog'));
@@ -106,10 +166,12 @@ function updateGroupLabels() {
   $('[data-page="campaign"]').hidden = activePlatform !== 'tiktok';
   $('[data-page="x"]').hidden = activePlatform !== 'x';
   $('#campaigns-unavailable-nav').hidden = activePlatform !== 'instagram';
+  $('[data-page="creator"]').hidden = activePlatform !== 'instagram';
 }
 function setActivePlatform(platform) {
   if (!['instagram', 'tiktok', 'x', 'facebook'].includes(platform) || activePlatform === platform) return;
   activePlatform = platform;
+  if (currentPage === 'creator' && platform !== 'instagram') page('accounts');
   localStorage.setItem('comment-studio-active-platform', platform);
   $('#dashboard-platform').value = platform; // Compatibility with the existing TikTok and X views.
   $('#dashboard-tag').value = 'all';
@@ -130,6 +192,7 @@ function page(name) {
   if (!pageNames[name]) return;
   if (name === 'campaign' && activePlatform !== 'tiktok') setActivePlatform('tiktok');
   if (name === 'x' && activePlatform !== 'x') setActivePlatform('x');
+  if (name === 'creator' && activePlatform !== 'instagram') setActivePlatform('instagram');
   currentPage = name;
   updateGroupLabels();
   const unavailable = name === 'postings' && !['instagram', 'facebook'].includes(activePlatform);
@@ -151,6 +214,15 @@ function page(name) {
   $('#notice').hidden = true;
   window.scrollTo({ top: 0 });
 }
+window.openPostingAccount = account => {
+  if (!['instagram', 'facebook'].includes(account?.platform)) return;
+  setActivePlatform(account.platform);
+  page('postings');
+  if (account.platform === 'instagram') {
+    window.focusInstagramPosting?.(account.id);
+    $('#posting-feedback').hidden = true;
+  } else window.focusFacebookPage?.(account.id);
+};
 $$('[data-page]').forEach(button => button.addEventListener('click', () => page(button.dataset.page)));
 $$('.nav-group').forEach(group => group.querySelector('button').addEventListener('click', () => {
   if (document.body.classList.contains('sidebar-collapsed')) setSidebarCollapsed(false);
@@ -448,6 +520,7 @@ function renderAccountTimes() {
 }
 function syncAccountSchedule() {
   const instagram = accountForm.elements.platform.value === 'instagram';
+  $('#account-add-by-link').hidden = !instagram || Boolean(accountForm.elements.id.value);
   $('#account-schedule').hidden = !instagram;
   $('#account-time-variation').disabled = $('#account-time-zone').disabled = !instagram;
   accountForm.elements.name.required = !instagram || Boolean(accountForm.elements.id.value);
@@ -479,9 +552,15 @@ function syncAccountConnectionType() {
   $('#account-proxy-field').hidden = $('#account-proxy-help').hidden = $('#account-add-proxy').hidden = !proxy;
   $('#proxy-select').required = proxy;
   if (!proxy) $('#proxy-select').value = '';
+  const postable = ['instagram', 'facebook'].includes(accountForm.elements.platform.value);
+  $('#account-posting-connection-field').hidden = $('#account-posting-connection-help').hidden = !postable;
+  const postingProxyOption = accountForm.elements.postingConnection.querySelector('[value="proxy"]');
+  postingProxyOption.disabled = !proxy || !$('#proxy-select').value;
+  if (postingProxyOption.disabled) accountForm.elements.postingConnection.value = 'direct';
 }
 $('#account-connection-type').addEventListener('change', syncAccountConnectionType);
-accountForm.elements.platform.addEventListener('change', syncAccountSchedule);
+$('#proxy-select').addEventListener('change', syncAccountConnectionType);
+accountForm.elements.platform.addEventListener('change', () => { syncAccountSchedule(); syncAccountConnectionType(); });
 $('#account-time-add').addEventListener('click', () => {
   const time = $('#account-time-input').value;
   if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(time)) { accountScheduleError('Escolha um horário válido.'); return; }
@@ -509,6 +588,8 @@ function editAccount(account) {
   loadAccountSchedule(account.id); syncAccountSchedule();
   $('#account-connection-type').value = account.proxyId ? 'proxy' : 'direct'; syncAccountConnectionType();
   accountForm.elements.proxyId.value = account.proxyId || '';
+  syncAccountConnectionType();
+  accountForm.elements.postingConnection.value = account.postingConnection || (account.proxyId ? 'proxy' : 'direct');
   $('#account-form-title').textContent = `Editar ${profileLabel(account)}`;
   $('#account-submit').textContent = 'Salvar alterações';
   if (!$('#account-dialog').open) $('#account-dialog').showModal();
@@ -686,6 +767,7 @@ function proxyCard(proxy, expanded) {
   return card;
 }
 function render() {
+  window.renderInstagramCreator?.(state);
   window.renderX?.(state);
   window.renderPostings?.(state);
   window.renderFacebook?.(state);
@@ -795,6 +877,78 @@ function renderAccounts() {
     group.append(grid); list.append(group);
   }
 }
+const instagramRegistrationDialog = $('#instagram-registration-details');
+const instagramRegistrationFields = $('#instagram-registration-fields');
+const instagramRegistrationStatus = $('#instagram-registration-status');
+let instagramRegistrationRequest;
+instagramRegistrationDialog.addEventListener('beforetoggle', event => {
+  if (event.newState === 'closed') {
+    instagramRegistrationRequest = undefined;
+    instagramRegistrationFields.replaceChildren();
+  }
+});
+
+async function showInstagramRegistration(account) {
+  const request = Symbol();
+  instagramRegistrationRequest = request;
+  $('#instagram-registration-title').textContent = `Dados do cadastro · ${profileLabel(account)}`;
+  instagramRegistrationFields.replaceChildren();
+  instagramRegistrationFields.hidden = true;
+  instagramRegistrationStatus.textContent = 'Carregando…';
+  instagramRegistrationDialog.showModal();
+  try {
+    const profile = await window.studio.loadInstagramDraft(account.id);
+    if (!instagramRegistrationDialog.open || instagramRegistrationRequest !== request) return;
+    const date = profile.birthDate;
+    const birthDate = date ? `${String(date.day).padStart(2, '0')}/${String(date.month).padStart(2, '0')}/${date.year}` : '';
+    const fields = [
+      ['Nome completo', profile.fullName], ['Nome de usuário', profile.handle],
+      ['E-mail', profile.email], ['Senha', profile.password], ['Data de nascimento', birthDate]
+    ];
+    for (const [title, value] of fields) {
+      const row = element('div', 'instagram-registration-field');
+      const label = element('label', '', title);
+      const input = element('input');
+      input.readOnly = true;
+      input.value = value || '';
+      input.placeholder = 'Não informado';
+      input.autocomplete = 'off';
+      const actions = element('div', 'creator-input-action');
+      label.append(input);
+      row.append(label);
+      if (title === 'Senha' && value) {
+        input.type = 'password';
+        const reveal = element('button', 'secondary', 'Mostrar');
+        reveal.type = 'button';
+        reveal.setAttribute('aria-pressed', 'false');
+        reveal.addEventListener('click', () => {
+          const show = input.type === 'password';
+          input.type = show ? 'text' : 'password';
+          reveal.textContent = show ? 'Ocultar' : 'Mostrar';
+          reveal.setAttribute('aria-pressed', String(show));
+        });
+        actions.append(reveal);
+      }
+      if (value) {
+        const copy = element('button', 'secondary', 'Copiar');
+        copy.type = 'button';
+        copy.setAttribute('aria-label', `Copiar ${title.toLowerCase()}`);
+        copy.addEventListener('click', async () => {
+          try { await navigator.clipboard.writeText(value); instagramRegistrationStatus.textContent = 'Copiado.'; }
+          catch { instagramRegistrationStatus.textContent = 'Não foi possível copiar.'; }
+        });
+        actions.append(copy);
+      }
+      row.append(actions);
+      instagramRegistrationFields.append(row);
+    }
+    instagramRegistrationFields.hidden = false;
+    instagramRegistrationStatus.textContent = 'Dados salvos no Comment Studio durante o cadastro.';
+  } catch {
+    if (instagramRegistrationDialog.open && instagramRegistrationRequest === request) instagramRegistrationStatus.textContent = 'Não foi possível ler os dados salvos desta conta.';
+  }
+}
+
 function accountCard(account, expanded, metric = null) {
   const platformId = account.platform || 'tiktok';
   const platform = platformName(platformId);
@@ -825,11 +979,21 @@ function accountCard(account, expanded, metric = null) {
   addAction('Testar conexão', () => window.studio.testConnection(account.id));
   if (proxy && account.browserProfile !== 'proxy' && !proxyBrowserOwner) addAction('Usar navegador da proxy', () => window.studio.useProxyBrowser(account.id));
   if (platformId === 'instagram') {
+    if (account.registration) addAction('Dados do cadastro', () => showInstagramRegistration(account));
     addAction(account.meta?.connected || account.meta?.needsReconnect ? 'Reconectar Instagram' : 'Conectar Instagram', () => window.studio.connectMeta(account.id));
+    addAction('Copiar link para Dolphin', async () => {
+      await window.studio.copyInstagramLoginLink(account.id);
+      instagramExternalAccountId = account.id;
+      $('#instagram-external-form').reset();
+      $('#instagram-external-error').hidden = true;
+      $('#instagram-external-dialog').showModal();
+      notify('Link copiado. Cole no perfil desejado do Dolphin.');
+    });
     if (account.meta?.connected || account.meta?.needsReconnect) addAction('Desconectar Instagram', () => window.studio.disconnectMeta(account.id));
   }
   if (platformId === 'facebook') {
     addAction('Abrir postagens da Página', () => { page('postings'); return Promise.resolve(); });
+    addAction('Copiar link para Dolphin', async () => { page('postings'); await window.startFacebookDolphin({ proxyId: account.proxyId || null, postingConnection: account.postingConnection || 'direct' }); });
     if (account.facebook?.connected) addAction('Desconectar Página', () => window.studio.disconnectFacebook(account.id));
   }
   if (platformId === 'tiktok') {
@@ -837,6 +1001,7 @@ function accountCard(account, expanded, metric = null) {
     if (account.tiktokAnalytics?.connected || account.tiktokAnalytics?.needsReconnect) addAction('Desconectar métricas TikTok', () => window.studio.disconnectTikTokAnalytics(account.id));
   }
   const edit = element('button', '', 'Editar conta'); edit.type = 'button'; edit.addEventListener('click', () => { menu.open = false; editAccount(account); }); menuContent.append(edit);
+  addAction('Limpar dados do navegador', async () => { if (!confirm(`Limpar cookies, cache e dados salvos do navegador de ${profileLabel(account)}?\n\nVocê precisará fazer login novamente.`)) return; return window.studio.resetBrowserData(account.id); });
   addAction('Excluir conta', async () => { const result = await window.studio.deleteAccount(account.id); if (result.accounts.every(item => item.id !== account.id) && accountForm.elements.id.value === account.id) resetAccountForm(); return result; }, true);
   if (proxy) {
     const otherUsers = state.accounts.filter(item => item.id !== account.id && item.proxyId === proxy.id).length;
@@ -857,9 +1022,11 @@ function accountCard(account, expanded, metric = null) {
   }
   topActions.append(menu); top.append(topActions); card.append(top);
   const summary = element('div', 'account-card-summary');
+  if (account.registration) summary.append(element('span', 'account-card-status', account.registration.status === 'completed' ? 'Criação confirmada manualmente' : account.registration.status === 'awaiting' ? 'Cadastro em andamento' : 'Rascunho de cadastro'));
   const browserOpen = account.open || account.browserOpen;
   summary.append(element('span', `account-card-status${browserOpen ? ' is-open' : ''}`, browserOpen ? 'Navegador aberto' : 'Navegador fechado'));
-  summary.append(element('span', 'account-card-status', proxy ? `Proxy · ${proxy.name}` : 'Conexão direta'));
+  summary.append(element('span', 'account-card-status', proxy ? `Conexão no app · proxy ${proxy.name}` : 'Conexão no app · direta'));
+  if (['instagram', 'facebook'].includes(platformId)) summary.append(element('span', 'account-card-status', `Publicação · ${account.postingConnection === 'direct' || (!account.postingConnection && !account.proxyId) ? 'IP do notebook' : 'proxy'}`));
   if (status !== 'unknown') summary.append(element('span', `account-card-status status-${status}`, status === 'connected' ? 'Meta autorizada' : status === 'disconnected' ? 'Meta não autorizada' : 'Precisa de atenção'));
   if (queued) summary.append(element('span', 'account-chip account-queue-chip', `${queued} ${queued === 1 ? 'vídeo' : 'vídeos'} na fila${schedule?.status === 'running' ? ' · ativa' : ''}`));
   const tagGroup = accountTagGroup(account);
@@ -872,7 +1039,8 @@ function accountCard(account, expanded, metric = null) {
   const details = element('details', 'account-details'); details.open = expanded;
   const detailsSummary = element('summary', '', 'Ver detalhes'); details.append(detailsSummary);
   const content = element('div', 'account-details-content');
-  content.append(element('p', '', `Conexão: ${proxy ? `${proxy.name} (${proxy.protocol?.toUpperCase() || 'Proxy'})` : 'Direta'}`));
+  content.append(element('p', '', `Conexão no Comment Studio: ${proxy ? `${proxy.name} (${proxy.protocol?.toUpperCase() || 'Proxy'})` : 'direta, sem proxy cadastrada nesta conta'}. A proxy do Dolphin é configurada separadamente no próprio Dolphin.`));
+  if (['instagram', 'facebook'].includes(platformId)) content.append(element('p', '', `Postagens: ${account.postingConnection === 'direct' || (!account.postingConnection && !account.proxyId) ? 'IP do notebook' : `proxy ${proxy?.name || 'não encontrada'}`}.`));
   content.append(element('p', '', `Sessão: ${account.browserProfile === 'proxy' ? 'compartilhada com o navegador desta proxy' : 'própria desta conta'}. Janela da automação ${account.open ? 'aberta' : 'fechada'}; navegador livre ${account.browserOpen ? 'aberto' : 'fechado'}.`));
   if (proxyBrowserOwner && account.browserProfile !== 'proxy') content.append(element('p', '', `Outra conta usa o navegador da proxy; o login de ${profileLabel(account)} permanece separado.`));
   if (platformId === 'instagram') content.append(element('p', '', `Meta: ${account.meta?.needsReconnect ? 'reconexão necessária' : account.meta?.connected ? `autorizada para @${account.meta.username || account.meta.igId}` : 'não autorizada'}. Insights ${account.meta?.insightsGranted ? 'autorizados' : 'não autorizados'}.`));
@@ -1244,34 +1412,26 @@ for (const id of ['dashboard-platform', 'dashboard-tag', 'dashboard-account', 'd
     $('#dashboard-from').value = localDate(from); $('#dashboard-to').value = localDate(new Date());
   }
   $('#dashboard-custom-dates').hidden = $('#dashboard-period').value !== 'custom'; renderDashboard();
+  window.scheduleInstagramRefresh?.();
 });
 $$('[data-chart-metric]').forEach(button => button.addEventListener('click', () => { $$('[data-chart-metric]').forEach(item => item.setAttribute('aria-pressed', String(item === button))); renderDashboard(); }));
 $('#dashboard-view-queue').addEventListener('click', () => { page('postings'); document.querySelector('[data-posting-tab="queue"]')?.click(); });
 $('#dashboard-refresh-insights').addEventListener('click', async event => {
   const button = event.currentTarget;
+  if(activePlatform==='instagram'){await window.instagramDashboard?.refresh(true);return;}
+  if(dashboardRefreshing)return;
   dashboardRefreshing = true; button.disabled = true; button.textContent = 'Atualizando totais…';
   const status = $('#dashboard-refresh-status'); status.textContent = 'Consultando métricas…';
-  let instagramRefreshId = null;
-  let instagramAlreadyRunning = false;
   try {
     const platform = $('#dashboard-platform').value;
     const messages = [];
-    if ((platform === 'all' || platform === 'instagram') && state.accounts.some(item => item.platform === 'instagram' && dashboardAccountMatches(item.id, platform) && item.meta?.connected && item.meta?.insightsGranted)) {
-      const ids = state.accounts.filter(item => item.platform === 'instagram' && dashboardAccountMatches(item.id, platform)).map(item => item.id);
-      const result = await window.studio.refreshInstagramInsights(window.instagramOfficialRanges ? { accountIds: ids, ranges: window.instagramOfficialRanges() } : ids); state = result.state;
-      instagramRefreshId = result.refreshId || null;
-      instagramAlreadyRunning = Boolean(result.alreadyRunning);
-      dashboardBackgroundRefreshing = Boolean(result.backgroundActive) && result.refreshId !== dashboardCompletedRefreshId;
-      const period=$('#dashboard-period').selectedOptions[0]?.textContent||'período selecionado';
-      messages.push(result.alreadyRunning ? 'Instagram: coleta em segundo plano já em andamento' : `Instagram (${period}): dados disponíveis em ${result.totalsAvailable??0}/${result.accounts} conta(s)${result.failures?.length ? ` · ${result.failures.join('; ')}` : ''}`);
-    }
     if ((platform === 'all' || platform === 'tiktok') && state.accounts.some(item => item.platform === 'tiktok' && dashboardAccountMatches(item.id, platform) && item.tiktokAnalytics?.connected)) {
       const ids = state.accounts.filter(item => item.platform === 'tiktok' && dashboardAccountMatches(item.id, platform)).map(item => item.id);
       const result = await window.studio.refreshTikTokInsights(ids); state = result.state;
       messages.push(`${result.updated} vídeo(s) TikTok atualizado(s)${result.failures?.length ? ` · ${result.failures.join('; ')}` : ''}`);
     }
     render();
-    if (!instagramRefreshId || instagramRefreshId !== dashboardCompletedRefreshId) dashboardRefreshMessage = `${instagramAlreadyRunning ? 'Coleta em andamento' : dashboardBackgroundRefreshing ? 'Coleta principal concluída · histórico e Reels em segundo plano' : 'Atualizado agora'} · ${messages.join(' · ')}`;
+    dashboardRefreshMessage = `Atualizado agora · ${messages.join(" · ")}`;
     if (!dashboardAutoRun) notify(messages.join(' · ') + '.');
   } catch (error) {
     dashboardRefreshMessage = `Falha na atualização: ${error.message}`;
@@ -1287,28 +1447,18 @@ function setDashboardAutoRefresh(enabled, runNow = false) {
   button.textContent = enabled ? 'Auto: a cada hora' : 'Auto: desligado';
   localStorage.setItem('comment-studio-dashboard-auto-refresh', String(enabled));
   if (enabled) {
+    let otherPlatformLastRun=Date.now();
     dashboardAutoTimer = setInterval(() => {
+      if(activePlatform==='instagram'){window.scheduleInstagramRefresh?.();return;}
+      if(Date.now()-otherPlatformLastRun<60*60000)return;otherPlatformLastRun=Date.now();
       const refresh = $('#dashboard-refresh-insights');
-      if (!dashboardRefreshing && !refresh.disabled) { dashboardAutoRun = true; refresh.click(); }
-    }, 60 * 60 * 1000);
+      if (!document.querySelector('[data-panel=dashboard]').hidden && !dashboardRefreshing && !refresh.disabled) { dashboardAutoRun = true; refresh.click(); }
+    }, 15 * 60 * 1000);
     if (runNow && !dashboardRefreshing && !$('#dashboard-refresh-insights').disabled) { dashboardAutoRun = true; $('#dashboard-refresh-insights').click(); }
   }
 }
-$('#dashboard-auto-refresh').addEventListener('click', () => setDashboardAutoRefresh($('#dashboard-auto-refresh').getAttribute('aria-pressed') !== 'true', true));
+$('#dashboard-auto-refresh').addEventListener('click', () => {const enabled=$('#dashboard-auto-refresh').getAttribute('aria-pressed') !== 'true';if(activePlatform==='instagram')window.instagramDashboard?.setAuto(enabled);else setDashboardAutoRefresh(enabled,true);});
 setDashboardAutoRefresh(localStorage.getItem('comment-studio-dashboard-auto-refresh') === 'true');
-window.onInsightsProgress?.(progress => {
-  if (progress.platform !== 'instagram') return;
-  if (progress.phase === 'official-ready') { renderDashboard(); $('#dashboard-refresh-status').textContent = `Totais oficiais: ${progress.accountsProcessed}/${progress.accountsTotal} contas`; return; }
-  if (progress.phase === 'background-start') { dashboardBackgroundRefreshing = true; $('#dashboard-refresh-status').textContent = 'Totais disponíveis · consultando histórico em segundo plano'; return; }
-  if (progress.phase === 'accounts') { renderDashboard(); $('#dashboard-refresh-status').textContent = `Histórico: ${progress.completed}/${progress.total} dias desta conta`; return; }
-  if (progress.phase === 'reels') { if (progress.processed === progress.total || progress.processed % 5 === 0) renderDashboard(); $('#dashboard-refresh-status').textContent = `Reels: ${progress.processed}/${progress.total} consultados em segundo plano`; return; }
-  if (progress.phase === 'background-complete') {
-    dashboardCompletedRefreshId = progress.refreshId || '';
-    dashboardBackgroundRefreshing = false;
-    dashboardRefreshMessage = `${progress.failures?.length ? 'Coleta parcial' : 'Coleta concluída'} · ${progress.accountDaysChecked || 0} dias e ${progress.updated || 0}/${progress.checked || 0} Reels consultados${progress.failures?.length ? ` · ${progress.failures.join('; ')}` : ''}`;
-    renderDashboard(); $('#dashboard-refresh-status').textContent = dashboardRefreshMessage;
-  }
-});
 $('#dashboard-tiktok-settings').addEventListener('click', () => {
   const settings = state.tiktokAnalyticsSettings || {};
   const form = $('#tiktok-analytics-form'); form.elements.clientKey.value = settings.clientKey || ''; form.elements.clientSecret.value = '';
@@ -1651,7 +1801,24 @@ accountForm.addEventListener('submit', async event => {
     }
   }
   const platform = platformName(data.platform);
-  if (await action(event.submitter || $('#account-submit'), () => editing ? window.studio.editAccount(data) : window.studio.addAccount(data), editing ? 'Conta atualizada.' : `Conta cadastrada. Abra o ${platform} para fazer o login.`)) resetAccountForm();
+  if (event.submitter?.id === 'account-add-by-link') {
+    let started;
+    if (await action(event.submitter, async () => { started = await window.studio.startInstagramAccountLink(data); return started; }, 'Link copiado. Abra no perfil do Dolphin.')) {
+      resetAccountForm(); showInstagramLinkWaiting(started);
+    }
+    return;
+  }
+  let createdAccount;
+  const saved = await action(event.submitter || $('#account-submit'), async () => {
+    const previousIds = new Set(state.accounts.map(account => account.id));
+    const next = editing ? await window.studio.editAccount(data) : await window.studio.addAccount(data);
+    if (!editing) createdAccount = next.accounts.find(account => !previousIds.has(account.id));
+    return next;
+  }, editing ? 'Conta atualizada.' : `Conta cadastrada. Abra o ${platform} para fazer o login.`);
+  if (saved) {
+    resetAccountForm();
+    if (createdAccount && ['instagram', 'facebook'].includes(createdAccount.platform)) window.openPostingAccount(createdAccount);
+  }
 });
 const proxyPaste = $('#proxy-paste');
 let suggestedProxyName = '';
@@ -1693,6 +1860,7 @@ proxyForm.addEventListener('submit', async event => {
       $('#account-connection-type').value = 'proxy';
       syncAccountConnectionType();
       accountForm.elements.proxyId.value = createdForAccount.id;
+      syncAccountConnectionType();
       $('#account-submit').focus();
     }
     notify(editing ? 'Proxy atualizado.' : createdForAccount ? 'Proxy testado e selecionado. Conclua o cadastro da conta.' : 'Proxy testado e salvo.');

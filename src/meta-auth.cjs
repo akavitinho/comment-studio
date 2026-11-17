@@ -2,6 +2,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { randomBytes } = require('node:crypto');
 const { createProxyFetch } = require('./proxy-fetch.cjs');
+const { authorizationCode } = require('./oauth-callback.cjs');
 const REQUIRED_PERMISSIONS = ['instagram_business_basic', 'instagram_business_content_publish'];
 const INSIGHTS_PERMISSION = 'instagram_business_manage_insights';
 const serviceUrl = (storage, name) => storage?.url ? `${storage.url}/functions/v1/${name}` : '';
@@ -18,6 +19,8 @@ class MetaAuth {
     this.requestService = requestService;
     this.registerLoginWindow = registerLoginWindow;
     this.connecting = new Set();
+    this.external = new Map();
+    this.automatic = new Map();
     this.data = fs.existsSync(this.file) ? JSON.parse(fs.readFileSync(this.file, 'utf8')) : { appId: '', redirectUri: '', graphVersion: 'v23.0', accounts: {} };
     let updated = false;
     if (!this.data.installId) { this.data.installId = randomBytes(24).toString('hex'); updated = true; }
@@ -73,16 +76,58 @@ class MetaAuth {
     try { return await this.connectOnce(accountId); }
     finally { this.connecting.delete(accountId); }
   }
-  async connectOnce(accountId) {
+  async beginAuthorization(accountId, { connection: suppliedConnection = null, autoConnect = false, pollSecret = null, forceAuthentication = false } = {}) {
     if (!this.data.redirectUri) throw new Error('Configure o retorno do Instagram antes de conectar a conta.');
-    const connection = await this.getConnection(accountId);
-    const started = await this.service(connection, { action: 'start', accountId });
+    const connection = suppliedConnection || await this.getConnection(accountId);
+    const started = await this.service(connection, { action: 'start', accountId, ...(autoConnect ? { autoConnect: true, pollSecret } : {}) });
     if (!/^\d{8,25}$/.test(String(started.appId || '')) || started.provider !== 'instagram' || started.redirectUri !== this.data.redirectUri || typeof started.state !== 'string') throw new Error('Configuração do ClubXone não corresponde ao serviço de autorização.');
     this.data.appId = started.appId; this.save();
     const nonce = started.state;
     const login = new URL('https://www.instagram.com/oauth/authorize');
-    login.searchParams.set('force_authentication', '1');
+    if (forceAuthentication) login.searchParams.set('force_authentication', '1');
     login.searchParams.set('client_id', this.data.appId); login.searchParams.set('redirect_uri', this.data.redirectUri); login.searchParams.set('state', nonce); login.searchParams.set('response_type', 'code'); login.searchParams.set('scope', [...REQUIRED_PERMISSIONS, INSIGHTS_PERMISSION].join(','));
+    return { connection, started, nonce, login };
+  }
+  async startAutomatic(accountId, connection) {
+    const pollSecret = randomBytes(32).toString('hex');
+    const { started, nonce, login } = await this.beginAuthorization(accountId, { connection, autoConnect: true, pollSecret });
+    const expiresAt = started.expiresAt;
+    if (!(Date.parse(expiresAt) > Date.now())) throw new Error('O link de conexão expirou. Gere um novo link.');
+    this.automatic.set(accountId, { connection, nonce, pollSecret, expiresAt });
+    return { loginUrl: login.toString(), expiresAt };
+  }
+  async pollAutomatic(accountId) {
+    const pending = this.automatic.get(accountId);
+    if (!pending) throw new Error('Este link de conexão não está mais ativo.');
+    if (Date.now() >= Date.parse(pending.expiresAt)) { this.automatic.delete(accountId); throw new Error('O link de conexão expirou. Gere um novo link.'); }
+    const base = { accountId, state: pending.nonce, pollSecret: pending.pollSecret };
+    const result = await this.service(pending.connection, { action: 'status', ...base });
+    if (result.status === 'pending') return { status: 'pending' };
+    if (result.status === 'cancelled') { this.automatic.delete(accountId); throw new Error('A autorização foi cancelada no Instagram.'); }
+    if (result.status !== 'ready') throw new Error('Resposta de login inválida.');
+    this.automatic.delete(accountId);
+    const exchanged = await this.service(pending.connection, { action: 'exchange_auto', ...base });
+    return { status: 'ready', result: await this.profileFromExchange(pending.connection, exchanged) };
+  }
+  cancelAutomatic(accountId) { this.automatic.delete(accountId); }
+  async startExternal(accountId) {
+    if (this.connecting.has(accountId)) throw new Error('Aguarde o login Instagram já aberto nesta conta.');
+    const { connection, started, nonce, login } = await this.beginAuthorization(accountId);
+    const expiresAt = started.expiresAt || new Date(Date.now() + 600000).toISOString();
+    if (!(Date.parse(expiresAt) > Date.now())) throw new Error('O link de conexão expirou. Gere um novo link.');
+    this.external.set(accountId, { connection, nonce, expiresAt });
+    return { loginUrl: login.toString(), expiresAt };
+  }
+  async completeExternal(accountId, callbackUrl) {
+    const pending = this.external.get(accountId);
+    if (!pending) throw new Error('Gere primeiro um link de conexão para esta conta.');
+    const code = authorizationCode(callbackUrl, this.data.redirectUri, pending.nonce, pending.expiresAt);
+    this.external.delete(accountId);
+    return this.finishAuthorization(accountId, pending.connection, pending.nonce, code);
+  }
+  async connectOnce(accountId) {
+    this.external.delete(accountId);
+    const { connection, started, nonce, login } = await this.beginAuthorization(accountId, { forceAuthentication: true });
     const code = await new Promise((resolve, reject) => {
       const win = new this.BrowserWindow({ width: 600, height: 760, parent: this.parent(), title: 'Conectar Instagram', webPreferences: { session: connection.ses, contextIsolation: true, nodeIntegration: false, sandbox: true } });
       this.registerLoginWindow(win, connection);
@@ -96,7 +141,13 @@ class MetaAuth {
       win.on('closed', () => finish(new Error('Login Meta cancelado.')));
       win.loadURL(login.toString()).catch(() => { if (!done) finish(new Error('Não foi possível abrir o login Meta.')); });
     });
+    return this.finishAuthorization(accountId, connection, nonce, code);
+  }
+  async finishAuthorization(accountId, connection, nonce, code) {
     const exchanged = await this.service(connection, { action: 'exchange', accountId, state: nonce, code });
+    return this.profileFromExchange(connection, exchanged);
+  }
+  async profileFromExchange(connection, exchanged) {
     if (typeof exchanged.accessToken !== 'string' || !exchanged.accessToken) throw new Error('O serviço Meta não retornou uma autorização.');
     const userToken = exchanged.accessToken;
     const granted = Array.isArray(exchanged.permissions) ? exchanged.permissions : [];
@@ -128,13 +179,13 @@ class MetaAuth {
     const image = Buffer.from(await response.arrayBuffer());
     return image.length && image.length <= 512 * 1024 ? `data:${type};base64,${image.toString('base64')}` : null;
   }
-  async token(accountId) {
+  async token(accountId, requestConnection = null) {
     const account = this.data.accounts[accountId];
     if (!account?.token || account.needsReconnect || account.provider !== 'instagram') throw new Error('Reconecte esta conta ao Instagram.');
     if (!account.expiresAt || Date.parse(account.expiresAt) <= Date.now()) { this.markReconnect(accountId); throw new Error('Autorização Instagram expirada. Reconecte a conta.'); }
     let token = await this.open(account.token);
     if (Date.parse(account.expiresAt) - Date.now() < 7 * 86400000) {
-      const connection = await this.getConnection(accountId);
+      const connection = requestConnection || await this.getConnection(accountId);
       const url = new URL('https://graph.instagram.com/refresh_access_token');
       url.searchParams.set('grant_type', 'ig_refresh_token'); url.searchParams.set('access_token', token);
       const response = await createProxyFetch(this.net, connection)(url);
@@ -146,6 +197,6 @@ class MetaAuth {
     return token;
   }
   markReconnect(accountId) { if (this.data.accounts[accountId]) { this.data.accounts[accountId].needsReconnect = true; this.save(); } }
-  disconnect(accountId) { delete this.data.accounts[accountId]; this.save(); return this.status(accountId); }
+  disconnect(accountId) { this.external.delete(accountId); this.automatic.delete(accountId); delete this.data.accounts[accountId]; this.save(); return this.status(accountId); }
 }
 module.exports = { MetaAuth, missingPermissions };

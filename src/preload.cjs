@@ -1,6 +1,8 @@
 const { contextBridge, ipcRenderer } = require('electron');
 const methods = ['state', 'openGeoSource', 'addAccount', 'editAccount', 'deleteAccount', 'useProxyBrowser', 'addProxy', 'duplicateProxy', 'editProxy', 'deleteProxy', 'openProxyBrowser', 'closeProxyBrowser', 'openAccountBrowser', 'closeAccountBrowser', 'saveCampaign', 'startCampaign', 'stopCampaign', 'pauseCampaign', 'resumeCampaign', 'checkCampaign', 'openAttempt', 'openAccount', 'closeAccount', 'testConnection', 'testProxy', 'pickMediaVideos', 'pickMediaCover', 'pickMediaImages', 'pickMediaOutput', 'startMediaJob', 'cancelMediaJob', 'inspectDownloadLinks', 'startDownloadJob', 'cancelDownloadJob', 'openMediaOutput'];
 methods.push('resumeAccount');
+methods.push('addInstagramCreatorProxy');
+methods.push('generateInstagramProfile', 'saveInstagramDraft', 'loadInstagramDraft', 'openInstagramSignup', 'completeInstagramDraft');
 methods.push('saveAccountTag');
 methods.push('pauseAccount');
 methods.push('restartAccountCycle');
@@ -8,9 +10,11 @@ methods.push('saveXCampaign', 'startXCampaign', 'pauseXCampaign', 'resumeXCampai
 methods.push('savePostingSchedule', 'savePostingSchedules', 'addPostingVideo', 'updatePostingVideo', 'removePostingVideo', 'controlPosting', 'startQueuedPostings');
 methods.push('movePostingVideo', 'retryPostingVideo');
 methods.push('clearPostingQueue');
+methods.push('updatePostingCaptions');
 methods.push('pickPostingVideoFolder', 'savePostingMediaSettings', 'selectPostingFolder', 'importPostingFolder');
 methods.push('previewPostingSchedule');
-methods.push('saveMetaSettings', 'connectMeta', 'disconnectMeta');
+methods.push('saveMetaSettings', 'connectMeta', 'disconnectMeta', 'copyInstagramLoginLink', 'completeInstagramExternalLogin');
+methods.push('startInstagramAccountLink', 'copyInstagramAccountLink', 'pollInstagramAccountLink', 'cancelInstagramAccountLink');
 methods.push('savePostingStorage');
 methods.push('openPublishedReel', 'openPublishedFacebookReel');
 methods.push('videoThumbnail');
@@ -19,6 +23,7 @@ methods.push('postingProfilePicture');
 methods.push('refreshInstagramInsights');
 methods.push('instagramAccountInsights');
 methods.push('instagramOfficialMetrics');
+methods.push('resetBrowserData');
 contextBridge.exposeInMainWorld('onInsightsProgress', callback => {
   const listener = (_event, progress) => callback(progress);
   ipcRenderer.on('studio:insights-progress', listener);
@@ -26,7 +31,7 @@ contextBridge.exposeInMainWorld('onInsightsProgress', callback => {
 });
 methods.push('saveTikTokAnalyticsSettings', 'connectTikTokAnalytics', 'disconnectTikTokAnalytics', 'refreshTikTokInsights');
 methods.push('resolveUncertainPosting');
-methods.push('connectFacebook', 'bindFacebookPages', 'disconnectFacebook', 'addFacebookPost', 'queueFacebookFromInstagram', 'saveFacebookSchedule', 'controlFacebookPosting', 'retryFacebookPost', 'resolveFacebookUncertain', 'refreshFacebookInsights');
+methods.push('connectFacebook', 'copyFacebookLoginLink', 'completeFacebookExternalLogin', 'bindFacebookPages', 'disconnectFacebook', 'addFacebookPost', 'queueFacebookFromInstagram', 'saveFacebookSchedule', 'controlFacebookPosting', 'retryFacebookPost', 'resolveFacebookUncertain', 'refreshFacebookInsights');
 contextBridge.exposeInMainWorld('studio', Object.fromEntries(methods.map(method => [method, async payload => {
   const result = await ipcRenderer.invoke(`studio:${method}`, payload);
   if (!result.ok) throw new Error(result.error);

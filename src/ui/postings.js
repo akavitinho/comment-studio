@@ -38,6 +38,13 @@
   const addAccountForm = document.querySelector('#posting-account-form');
   const addProxyForm = document.querySelector('#posting-new-proxy-form');
   const proxySelect = document.querySelector('#posting-account-proxy');
+  const postingConnectionSelect = addAccountForm.elements.postingConnection;
+  const syncPostingConnection = () => {
+    postingConnectionSelect.querySelector('[value="proxy"]').disabled = !proxySelect.value;
+    if (!proxySelect.value) postingConnectionSelect.value = 'direct';
+  };
+  proxySelect.addEventListener('change', syncPostingConnection);
+  syncPostingConnection();
   const startAll = document.querySelector('#posting-start-all');
   const startSelected = document.querySelector('#posting-start-selected');
   const search = document.querySelector('#posting-search');
@@ -59,6 +66,49 @@
   const queueReady = document.querySelector('#posting-queue-ready');
   let activeTab = 'queue';
   const selectedAccountIds = new Set();
+  const captionForm = document.querySelector('#posting-caption-form');
+  const captionText = document.querySelector('#posting-caption-text');
+  const captionScope = document.querySelector('#posting-caption-scope');
+  const captionMode = document.querySelector('#posting-caption-mode');
+  const captionApply = document.querySelector('#posting-caption-apply');
+  const captionFeedback = document.querySelector('#posting-caption-feedback');
+  let applyingCaption = false;
+  const captionAccountIds = () => (window.postingState?.accounts || [])
+    .filter(account => account.platform === 'instagram' && (captionScope.value === 'all' || selectedAccountIds.has(account.id)))
+    .map(account => account.id);
+  function updateCaptionControls() {
+    const ids = new Set(captionAccountIds());
+    const count = (window.postingState?.postings?.items || []).filter(item => ids.has(item.account_id)
+      && item.queue_kind !== 'shared' && item.status === 'queued'
+      && (captionMode.value !== 'empty' || !item.caption.trim())).length;
+    document.querySelector('#posting-caption-count').textContent = `${captionText.value.length.toLocaleString('pt-BR')} / 2.200 caracteres`;
+    document.querySelector('#posting-caption-targets').textContent = `${count} ${count === 1 ? 'vídeo será atualizado' : 'vídeos serão atualizados'}`;
+    captionApply.disabled = applyingCaption || !count || !captionText.value.trim() || captionText.value.length > 2200;
+    captionApply.textContent = applyingCaption ? 'Aplicando…' : 'Aplicar legenda';
+  }
+  captionForm.addEventListener('input', () => { captionFeedback.hidden = true; updateCaptionControls(); });
+  captionForm.addEventListener('change', () => { captionFeedback.hidden = true; updateCaptionControls(); });
+  captionForm.addEventListener('submit', async event => {
+    event.preventDefault();
+    if (applyingCaption || captionApply.disabled) return;
+    const payload = { accountIds: captionAccountIds(), caption: captionText.value, onlyEmpty: captionMode.value === 'empty' };
+    applyingCaption = true;
+    captionText.disabled = captionScope.disabled = captionMode.disabled = true;
+    updateCaptionControls();
+    try {
+      const next = await window.studio.updatePostingCaptions(payload);
+      if (window.applyStudioState) window.applyStudioState(next); else window.renderPostings(next);
+      captionFeedback.textContent = next.updatedCount
+        ? `Legenda aplicada a ${next.updatedCount} ${next.updatedCount === 1 ? 'vídeo' : 'vídeos'}.`
+        : 'Nenhum vídeo aguardando na fila corresponde às opções escolhidas.';
+    } catch (error) { captionFeedback.textContent = error.message; }
+    finally {
+      applyingCaption = false;
+      captionText.disabled = captionScope.disabled = captionMode.disabled = false;
+      captionFeedback.hidden = false;
+      updateCaptionControls();
+    }
+  });
   const queueOpen = new Map();
   const itemOpen = new Map();
   const folderImports = new Map();
@@ -83,6 +133,7 @@
     }
   };
   const updateBatchControls = () => {
+    updateCaptionControls();
     startAll.hidden = !startable.size;
     startAll.disabled = starting || !startable.size;
     const count = [...selectedAccountIds].filter(id => startable.has(id)).length;
@@ -169,6 +220,8 @@
       if (!card.hidden) visible++;
       card.querySelector('.posting-media-settings').hidden = name !== 'queue';
       card.querySelector('.posting-programming').hidden = name !== 'schedule';
+      const configureTimes = card.querySelector('.posting-configure-times');
+      if (configureTimes) configureTimes.hidden = name !== 'queue';
       card.querySelector('.posting-batch-note').hidden = count < 2;
       card.querySelector('.posting-save-rhythm').textContent = count > 1 ? `Aplicar horários às ${count} contas` : 'Salvar horários';
       const confirmation = card.querySelector('.posting-schedule-confirmation');
@@ -179,6 +232,13 @@
     if (archived) archived.hidden = name !== 'queue';
     document.querySelector('#posting-filter-empty').hidden = name !== 'queue' || !count || visible > 0;
     updateBatchControls();
+  };
+  window.focusInstagramPosting = accountId => {
+    search.value = '';
+    statusFilter.value = '';
+    showTab('queue', accountId);
+    const card = [...root.querySelectorAll('.posting-card[data-account-id]')].find(item => item.dataset.accountId === accountId);
+    card?.scrollIntoView({ block: 'start' });
   };
   search.addEventListener('input', () => showTab(activeTab));
   for (const field of [statusFilter, sort]) field.addEventListener('change', () => showTab(activeTab));
@@ -232,6 +292,7 @@
       window.applyStudioState(next);
       const target = proxyTargetAccountId ? [...root.querySelectorAll('.posting-card')].find(card => card.dataset.accountId === proxyTargetAccountId)?.querySelector('.posting-account-connection select') : proxySelect;
       if (target) target.value = created.id;
+      if (target === proxySelect) syncPostingConnection();
       if (proxyTargetAccountId) accountSetup.close();
       addProxyForm.hidden = true; addProxyForm.reset(); proxyTargetAccountId = '';
     } catch (error) { showError(error); }
@@ -245,14 +306,16 @@
     const previous = new Set((window.postingState?.accounts || []).map(account => account.id));
     submit.disabled = true;
     try {
-      const next = await window.studio.addAccount({ platform: 'instagram', name, proxyId: proxySelect.value });
+      const next = await window.studio.addAccount({ platform: 'instagram', name, proxyId: proxySelect.value, postingConnection: postingConnectionSelect.value });
       const created = next.accounts.find(account => !previous.has(account.id));
       if (!created) throw new Error('A conta foi salva, mas não apareceu na lista. Atualize o estado.');
       selectedAccountIds.clear(); selectedAccountIds.add(created.id);
       search.value = ''; statusFilter.value = '';
       window.applyStudioState(next);
       addAccountForm.reset();
-      document.querySelector('#posting-feedback').hidden = true;
+      syncPostingConnection();
+      accountSetup.close();
+      window.openPostingAccount?.(created);
     } catch (error) { showError(error); }
     finally { submit.disabled = false; }
   });
@@ -344,6 +407,7 @@
     const selectedProxy = proxySelect.value;
     proxySelect.replaceChildren(new Option('Conexão direta', ''), ...state.proxies.map(proxy => new Option(proxyLabel(proxy, state.accounts), proxy.id)));
     proxySelect.value = selectedProxy;
+    syncPostingConnection();
     if (state.metaSettings) {
       settingsForm.elements.appId.value = state.metaSettings.appId || '';
       settingsForm.elements.redirectUri.value = state.postingStorage?.url ? `${state.postingStorage.url}/functions/v1/meta-callback` : '';
@@ -393,6 +457,12 @@
       next.append(make('span', 'Próxima publicação'), make('strong', nextPublication(schedule?.next_at, config.timeZone)));
       header.append(next);
       card.append(header);
+      if (!schedule || config.mode !== 'fixed') {
+        const configureTimes = make('button', 'Configurar horários', 'secondary posting-configure-times');
+        configureTimes.type = 'button';
+        configureTimes.addEventListener('click', () => showTab('schedule', account.id));
+        card.append(configureTimes);
+      }
       const mediaSection = make('section', undefined, 'posting-section posting-media-settings');
       const coverOption = make('div', undefined, 'posting-media-cover');
       coverOption.append(make('span', 'Capa dos Reels', 'posting-media-label'));
@@ -415,7 +485,7 @@
           preview.replaceChildren(image); preview.disabled = false;
           preview.addEventListener('click', async () => {
             const dialog = make('dialog', undefined, 'posting-cover-dialog');
-            const full = make('img'); full.src = src; full.alt = `Capa selecionada: ${media.cover.split(/[\\/]/).pop()}`;
+            const full = make('img'); full.src = src; full.alt = `Capa selecionada: ${media.cover_name || media.cover.split(/[\\/]/).pop()}`;
             const close = make('button', 'Fechar', 'secondary'); close.type = 'button'; close.addEventListener('click', () => dialog.close());
             dialog.append(full, close); dialog.addEventListener('close', () => dialog.remove(), { once: true });
             document.body.append(dialog); dialog.showModal();
@@ -428,8 +498,8 @@
           coverOption.classList.add('posting-cover-unavailable');
         });
       }
-      const coverValue = make('strong', media.cover ? media.cover.split(/[\\/]/).pop() : 'Sem capa', 'posting-media-value');
-      coverValue.title = media.cover || 'Os vídeos serão preparados sem imagem inicial.';
+      const coverValue = make('strong', media.cover ? media.cover_name || media.cover.split(/[\\/]/).pop() : 'Sem capa', 'posting-media-value');
+      coverValue.title = media.cover ? 'Cópia protegida na pasta do Comment Studio.' : 'Os vídeos serão preparados sem imagem inicial.';
       coverRow.append(coverValue);
       const coverActions = make('div', undefined, 'posting-media-cover-actions');
       coverActions.append(button(media.cover ? 'Trocar' : '+ Adicionar', async () => {
@@ -439,7 +509,7 @@
       if (media.cover) coverActions.append(button('Remover', () => window.studio.savePostingMediaSettings({ accountId: account.id, cover: null })));
       coverRow.append(coverActions);
       coverOption.append(coverRow);
-      if (media.cover) coverOption.append(make('small', 'Capa selecionada para esta conta · clique na miniatura para ampliar', 'posting-cover-confirmation'));
+      if (media.cover) coverOption.append(make('small', 'Cópia guardada no Comment Studio · clique na miniatura para ampliar', 'posting-cover-confirmation'));
       mediaSection.append(coverOption);
       const source = make('div', undefined, 'posting-media-source');
       source.append(make('span', 'Pasta de vídeos', 'posting-media-label'));

@@ -393,6 +393,15 @@
   };
   const originalRender=renderDashboard;
   renderDashboard=()=>{
+    if(activePlatform==='instagram' && window.renderInstagramDashboard){window.renderInstagramDashboard();return;}
+    window.instagramDashboard?.controller.deactivate();
+    const automatic=localStorage.getItem('comment-studio-dashboard-auto-refresh')==='true';
+    document.querySelector('#dashboard-auto-refresh').setAttribute('aria-pressed',String(automatic));document.querySelector('#dashboard-auto-refresh').textContent=automatic?'Auto: a cada hora':'Auto: desligado';
+    document.querySelector('.official-dashboard')?.setAttribute('hidden','');document.querySelector('[data-panel=dashboard]').classList.remove('official-instagram');
+    for(const id of ['dashboard-start-time','dashboard-end-time','dashboard-group']){const field=document.getElementById(id);field.disabled=false;field.closest('label').hidden=false;}
+    for(const selector of ['#dashboard-metrics','.dashboard-network-analysis','.analytics-panel','.dashboard-analysis-bottom','.insights-queue-panel','.dashboard-campaign-panel','.dashboard-hourly-panel'])for(const node of dashboard.querySelectorAll(selector))node.hidden=false;
+    dashboard.querySelector('.dashboard-filter-details').hidden=false;
+    for(const node of dashboard.querySelectorAll('#dashboard-compare-from,#dashboard-compare-to'))node.closest('label').hidden=false;
     const platform = document.querySelector('#dashboard-platform').value;
     const instagram = platform === 'instagram', tiktok = platform === 'tiktok';
     dashboard.querySelector('h1').textContent = `Dashboard · ${platformName(platform)}`;

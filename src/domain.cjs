@@ -44,6 +44,17 @@ function accountTagDefinition(input) {
   if (!/^#[0-9a-f]{6}$/i.test(color)) throw new Error('Escolha uma cor válida para a tag.');
   return { name: names[0], color: color.toLowerCase() };
 }
+function postingConnection(value, proxyId) {
+  const mode = value === undefined || value === null || value === '' ? (proxyId ? 'proxy' : 'direct') : value;
+  if (!['proxy', 'direct'].includes(mode) || (mode === 'proxy' && !proxyId)) throw new Error('Escolha uma conexão de publicação válida para esta conta.');
+  return mode;
+}
+function postingProxy(account, proxies) {
+  if (postingConnection(account.postingConnection, account.proxyId) === 'direct') return null;
+  const proxy = proxies.find(item => item.id === account.proxyId);
+  if (!proxy) throw new Error('A proxy de publicação desta conta não foi encontrada.');
+  return proxy;
+}
 function account(input, proxies) {
   const proxyId = input.proxyId || null;
   if (proxyId && !proxies.some(p => p.id === proxyId)) throw new Error('Proxy não encontrado.');
@@ -54,14 +65,14 @@ function account(input, proxies) {
   const handle = String(input.handle || '').trim().replace(/^@/, '').slice(0, 80);
   const nameAuto = platform === 'instagram' && (!requestedName || (handle && requestedName === handle) || /^(?:conta\d+|\d{1,3})$/i.test(requestedName));
   const name = nameAuto && !requestedName ? `Instagram ${id.slice(0, 8)}` : text(input.name, 'Nome da conta');
-  return { id, platform, name, nameAuto, handle, proxyId, tags: accountTags(input.tags), createdAt: new Date().toISOString() };
+  return { id, platform, name, nameAuto, handle, proxyId, postingConnection: postingConnection(input.postingConnection, proxyId), tags: accountTags(input.tags), createdAt: new Date().toISOString() };
 }
 function accountChanges(input, proxies) {
   const proxyId = input.proxyId || null;
   if (proxyId && !proxies.some(p => p.id === proxyId)) throw new Error('Proxy não encontrado.');
   const platform = input.platform || 'tiktok';
   if (!['tiktok', 'instagram', 'facebook', 'x'].includes(platform)) throw new Error('Plataforma inválida.');
-  return { platform, name: text(input.name, 'Nome da conta'), handle: String(input.handle || '').trim().replace(/^@/, '').slice(0, 80), proxyId, ...(Object.hasOwn(input, 'tags') ? { tags: accountTags(input.tags) } : {}) };
+  return { platform, name: text(input.name, 'Nome da conta'), handle: String(input.handle || '').trim().replace(/^@/, '').slice(0, 80), proxyId, postingConnection: postingConnection(input.postingConnection, proxyId), ...(Object.hasOwn(input, 'tags') ? { tags: accountTags(input.tags) } : {}) };
 }
 function applyInstagramIdentity(account, username) {
   if (account.platform !== 'instagram' || typeof username !== 'string' || !/^[A-Za-z0-9._]{1,80}$/.test(username)) throw new Error('O Instagram retornou um usuário inválido.');
@@ -109,4 +120,4 @@ function campaign(input, accounts) {
     updatedAt: new Date().toISOString()
   };
 }
-module.exports = { proxy, account, accountChanges, applyInstagramIdentity, accountTags, accountTagDefinition, campaign };
+module.exports = { proxy, account, accountChanges, postingConnection, postingProxy, applyInstagramIdentity, accountTags, accountTagDefinition, campaign };

@@ -6,7 +6,7 @@ fs.mkdirSync(path.join(__dirname,'..','.smoke'),{recursive:true});
 
 app.setPath('userData',path.join(__dirname,'..','.smoke','dashboard-ui-data'));
 app.whenReady().then(async()=>{
-  const win=new BrowserWindow({show:false,width:1400,height:900,webPreferences:{preload:path.join(__dirname,'postings-ui-preload.cjs'),contextIsolation:true,sandbox:true,nodeIntegration:false,backgroundThrottling:false}});
+  const win=new BrowserWindow({show:false,width:1400,height:900,webPreferences:{offscreen:true,preload:path.join(__dirname,'postings-ui-preload.cjs'),contextIsolation:true,sandbox:true,nodeIntegration:false,backgroundThrottling:false}});
   try{
     await win.loadFile(path.join(__dirname,'..','src','ui','index.html'));
     const initial=await win.webContents.executeJavaScript(`(async()=>{
@@ -17,10 +17,21 @@ app.whenReady().then(async()=>{
       return {title:document.querySelector('[data-panel=dashboard] h1').textContent,cards:document.querySelectorAll('.official-card').length,views:document.querySelector('.official-card strong')?.textContent,chart:!!document.querySelector('.official-graph svg'),activity:!!document.querySelector('.official-activity'),ranking:!!document.querySelector('.official-ranking'),reels:document.querySelectorAll('.official-reel').length,queue:!!document.querySelector('.official-queue'),oldHidden:getComputedStyle(document.querySelector('#dashboard-metrics')).display==='none'};
     })()`);
     assert.equal(initial.title,'Dashboard Instagram');
-    assert.equal(initial.cards,6);assert.equal(initial.views,'125');
+    assert.equal(initial.cards,5);assert.equal(initial.views,'125');
     assert.equal(initial.chart,true);assert.equal(initial.activity,true);assert.equal(initial.ranking,true);assert.equal(initial.reels,1);assert.equal(initial.queue,true);assert.equal(initial.oldHidden,true);
     assert.equal(await win.webContents.executeJavaScript("document.querySelector('.official-ranking .account-tag')?.textContent"),'#Contas antigas');
     assert.equal(await win.webContents.executeJavaScript("document.querySelector('.official-ranking .account-tag')?.style.getPropertyValue('--tag-color')"),'#cc3366');
+    const collection=await win.webContents.executeJavaScript(`(async()=>{
+      window.instagramDashboard.setAuto(false);await window.testInsights.configure(true);
+      const button=document.querySelector('#dashboard-refresh-insights');button.click();
+      await new Promise(resolve=>setTimeout(resolve,120));
+      const busy=button.disabled;button.click();
+      const calls=await window.testInsights.calls();
+      await window.testInsights.emit({platform:'instagram',refreshId:'test-refresh',phase:'background-complete',updated:1,checked:1,failures:[]});
+      await new Promise(resolve=>setTimeout(resolve,120));
+      return {busy,calls,finished:!button.disabled};
+    })()`);
+    assert.deepEqual(collection,{busy:true,calls:1,finished:true});
     const stable=await win.webContents.executeJavaScript(`(async()=>{
       const card=document.querySelector('.official-rank-row'),reel=document.querySelector('.official-reel');
       await new Promise(resolve=>setTimeout(resolve,120));
@@ -99,10 +110,12 @@ app.whenReady().then(async()=>{
     })()`);
     assert.equal(navigation.selected,'x');assert.match(navigation.title,/Twitter/);assert.equal(navigation.count,'1');assert.equal(navigation.instagramVisible,false);assert.equal(navigation.networkSubitems,0);assert.equal(navigation.xCampaignVisible,true);assert.equal(navigation.xCampaignOpened,true);assert.match(navigation.postings,/ainda não estão disponíveis/);assert.equal(navigation.instagramPostings,false);assert.equal(navigation.instagramTitle,'Dashboard Instagram',JSON.stringify(navigation));assert.equal(navigation.instagramPanelHidden,false);assert.equal(navigation.instagramCampaignSoon,true);assert.equal(navigation.returnTitle,'Dashboard Instagram',JSON.stringify(navigation));assert.equal(navigation.returnPanelHidden,false);assert.equal(navigation.periodBefore,'7');assert.equal(navigation.periodAfter,'7');
     await new Promise(resolve=>setTimeout(resolve,220));
-    await win.webContents.executeJavaScript('window.scrollTo(0,1);window.scrollTo(0,0)');
+    await win.webContents.executeJavaScript("document.querySelector('.nav-group[data-platform=\"instagram\"] button').click();document.querySelector('[data-page=dashboard]').click();window.scrollTo(0,0)");
+    win.webContents.invalidate();
     await new Promise(resolve=>setTimeout(resolve,80));
     fs.writeFileSync(path.join(__dirname,'..','.smoke','dashboard-wide.png'),(await win.webContents.capturePage()).toPNG());
-    await win.webContents.executeJavaScript("document.querySelector('.official-activity').scrollIntoView({block:'start'})");
+    await win.webContents.executeJavaScript("const detail=document.querySelector('.official-activity').closest('details');detail.open=true;document.querySelector('.official-activity').scrollIntoView({block:'start'})");
+    win.webContents.invalidate();
     await new Promise(resolve=>setTimeout(resolve,80));
     fs.writeFileSync(path.join(__dirname,'..','.smoke','dashboard-activity.png'),(await win.webContents.capturePage()).toPNG());
     await win.webContents.executeJavaScript('window.scrollTo(0,0)');
@@ -137,7 +150,7 @@ app.whenReady().then(async()=>{
     await win.webContents.executeJavaScript("document.querySelector('.nav-group[data-platform=\"x\"] button').click()");
     await win.webContents.reloadIgnoringCache();
     const restored=await win.webContents.executeJavaScript(`(async()=>{
-      for(let i=0;i<80&&!document.body.dataset.ready;i++)await new Promise(resolve=>setTimeout(resolve,25));
+      for(let i=0;i<80&&(!document.body.dataset.ready||!document.body.dataset.dashboardReady);i++)await new Promise(resolve=>setTimeout(resolve,25));
       return {platform:localStorage.getItem('comment-studio-active-platform'),selected:document.querySelector('.nav-group.selected-platform')?.dataset.platform,title:document.querySelector('[data-panel="dashboard"] h1').textContent,count:document.querySelector('#account-count').textContent};
     })()`);
     assert.equal(restored.platform,'x');assert.equal(restored.selected,'x');assert.match(restored.title,/Twitter/);assert.equal(restored.count,'1');

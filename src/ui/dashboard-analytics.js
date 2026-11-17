@@ -71,13 +71,13 @@
     }
     return [...buckets].sort((a, b) => a[0] - b[0]);
   }
-  function instagramHourlyActivity(items, history, accountIds, from, to) {
+  function instagramHourlyActivity(items, history, accountIds, from, to, hourOf = at => new Date(at).getHours()) {
     const ids = new Set(accountIds);
     const monitored = new Set(items.filter(item => ids.has(item.account_id)).map(item => item.id));
     const hours = Array.from({ length: 24 }, (_, hour) => ({ hour, published: 0, views: null, intervals: 0 }));
     for (const item of items) {
       const at = Date.parse(item.published_at);
-      if (item.status === 'published' && ids.has(item.account_id) && at >= from && at < to) hours[new Date(at).getHours()].published++;
+      if (item.status === 'published' && ids.has(item.account_id) && at >= from && at < to) hours[hourOf(at)].published++;
     }
     const series = new Map();
     for (const point of history) {
@@ -92,7 +92,7 @@
         const start = Date.parse(previous.fetched_at), end = Date.parse(current.fetched_at);
         const first = Number(previous.views), last = Number(current.views);
         if (end < from || end >= to || end <= start || previous.views == null || current.views == null || !Number.isFinite(first) || !Number.isFinite(last) || last < first) continue;
-        const bucket = hours[new Date(end).getHours()];
+        const bucket = hours[hourOf(end)];
         bucket.views = (bucket.views || 0) + last - first;
         bucket.intervals++;
       }

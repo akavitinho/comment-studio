@@ -1,6 +1,6 @@
 const fs = require('node:fs');
 const path = require('node:path');
-const { randomUUID } = require('node:crypto');
+const { randomUUID, createHash } = require('node:crypto');
 const { DatabaseSync } = require('node:sqlite');
 
 const weekdays = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
@@ -68,6 +68,7 @@ function fixedConfig(input) {
 class PostingPlan {
   constructor(file) {
     fs.mkdirSync(path.dirname(file), { recursive: true });
+    this.coverDirectory = path.join(path.dirname(file), 'posting-covers');
     this.db = new DatabaseSync(file);
     this.db.exec(`PRAGMA journal_mode=WAL;
       CREATE TABLE IF NOT EXISTS schedules (account_id TEXT PRIMARY KEY, config TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'stopped', next_at TEXT, group_id TEXT);
@@ -85,6 +86,7 @@ class PostingPlan {
     if (!mediaCols.has('cross_post_facebook')) this.db.exec("ALTER TABLE posting_media_settings ADD COLUMN cross_post_facebook INTEGER NOT NULL DEFAULT 0");
     if (!mediaCols.has('facebook_page_id')) this.db.exec("ALTER TABLE posting_media_settings ADD COLUMN facebook_page_id TEXT");
     if (!mediaCols.has('facebook_page_token')) this.db.exec("ALTER TABLE posting_media_settings ADD COLUMN facebook_page_token TEXT");
+    if (!mediaCols.has('cover_name')) this.db.exec('ALTER TABLE posting_media_settings ADD COLUMN cover_name TEXT');
     const columns = new Set(this.db.prepare('PRAGMA table_info(items)').all().map(row => row.name));
     if (!this.db.prepare('PRAGMA table_info(schedules)').all().some(row => row.name === 'group_id')) this.db.exec('ALTER TABLE schedules ADD COLUMN group_id TEXT');
     if (!columns.has('published_at')) this.db.exec('ALTER TABLE items ADD COLUMN published_at TEXT');
@@ -120,12 +122,42 @@ class PostingPlan {
     this.db.prepare("UPDATE items SET status='uncertain' WHERE status='publishing'").run();
     this.db.prepare("UPDATE items SET status='queued' WHERE status IN ('uploading','processing')").run();
     for (const row of this.db.prepare("SELECT account_id,config FROM schedules WHERE json_extract(config,'$.mode')='fixed'").all()) this.scheduleFixed(row.account_id, new Date(), { preserve: true });
+    this.migrateCovers();
+  }
+  coverFolder(accountId) { return path.join(this.coverDirectory, createHash('sha256').update(accountId).digest('hex')); }
+  isManagedCover(file) {
+    if (!file) return false;
+    const relative = path.relative(this.coverDirectory, file);
+    return relative && relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
+  }
+  copyCover(accountId, source) {
+    const folder = this.coverFolder(accountId);
+    fs.mkdirSync(folder, { recursive: true });
+    const target = path.join(folder, `${randomUUID()}-${path.basename(source)}`);
+    try { fs.copyFileSync(source, target, fs.constants.COPYFILE_EXCL); }
+    catch (error) { if (error.code !== 'EEXIST') try { fs.unlinkSync(target); } catch { /* Copy may not have created a file. */ } throw error; }
+    return target;
+  }
+  removeManagedCover(file) {
+    if (!this.isManagedCover(file)) return;
+    try { fs.unlinkSync(file); } catch (error) { if (error.code !== 'ENOENT') return; }
+    try { fs.rmdirSync(path.dirname(file)); } catch { /* Other covers may still be stored here. */ }
+  }
+  migrateCovers() {
+    for (const row of this.db.prepare('SELECT account_id,cover,cover_name FROM posting_media_settings WHERE cover IS NOT NULL').all()) {
+      if (this.isManagedCover(row.cover) || !fs.existsSync(row.cover)) continue;
+      let copied;
+      try {
+        copied = this.copyCover(row.account_id, row.cover);
+        this.db.prepare('UPDATE posting_media_settings SET cover=?,cover_name=? WHERE account_id=? AND cover=?').run(copied, row.cover_name || path.basename(row.cover), row.account_id, row.cover);
+      } catch { if (copied) this.removeManagedCover(copied); }
+    }
   }
   snapshot() {
-    return { schedules: this.db.prepare('SELECT * FROM schedules').all().map(row => ({ ...row, config: JSON.parse(row.config) })), mediaSettings: this.db.prepare('SELECT account_id,folder,cover,video_order,cross_post_facebook,facebook_page_id FROM posting_media_settings').all(), items: this.db.prepare('SELECT * FROM items ORDER BY account_id, position, created_at').all(), attempts: this.db.prepare('SELECT * FROM attempts ORDER BY at DESC LIMIT 100').all(), insights: this.db.prepare('SELECT * FROM media_insights').all(), insightHistory: this.db.prepare('SELECT item_id,media_id,views,reach,fetched_at FROM media_insight_history ORDER BY fetched_at').all() };
+    return { schedules: this.db.prepare('SELECT * FROM schedules').all().map(row => ({ ...row, config: JSON.parse(row.config) })), mediaSettings: this.db.prepare('SELECT account_id,folder,cover,cover_name,video_order,cross_post_facebook,facebook_page_id FROM posting_media_settings').all(), items: this.db.prepare('SELECT * FROM items ORDER BY account_id, position, created_at').all(), attempts: this.db.prepare('SELECT * FROM attempts ORDER BY at DESC LIMIT 100').all(), insights: this.db.prepare('SELECT * FROM media_insights').all(), insightHistory: this.db.prepare('SELECT item_id,media_id,views,reach,fetched_at FROM media_insight_history ORDER BY fetched_at').all() };
   }
   mediaSettings(accountId) {
-    return this.db.prepare('SELECT folder,cover,video_order,cross_post_facebook,facebook_page_id,facebook_page_token FROM posting_media_settings WHERE account_id=?').get(accountId) || { folder: null, cover: null, video_order: 'sequence', cross_post_facebook: 0, facebook_page_id: null, facebook_page_token: null };
+    return this.db.prepare('SELECT folder,cover,cover_name,video_order,cross_post_facebook,facebook_page_id,facebook_page_token FROM posting_media_settings WHERE account_id=?').get(accountId) || { folder: null, cover: null, cover_name: null, video_order: 'sequence', cross_post_facebook: 0, facebook_page_id: null, facebook_page_token: null };
   }
   saveMediaSettings(accountId, changes) {
     const current = this.mediaSettings(accountId);
@@ -138,7 +170,14 @@ class PostingPlan {
     if (changes.folder !== undefined && folder !== null && (typeof folder !== 'string' || !path.isAbsolute(folder) || !fs.existsSync(folder) || !fs.statSync(folder).isDirectory())) throw new Error('Selecione uma pasta de vídeos existente.');
     if (changes.cover !== undefined && cover !== null && (typeof cover !== 'string' || !path.isAbsolute(cover) || !fs.existsSync(cover) || !fs.statSync(cover).isFile() || !/\.(jpe?g|png|webp)$/i.test(cover))) throw new Error('Selecione uma capa JPG, PNG ou WebP existente.');
     if (!['sequence', 'random'].includes(videoOrder)) throw new Error('Escolha Sequência ou Aleatório para a ordem dos vídeos.');
-    this.db.prepare('INSERT INTO posting_media_settings (account_id,folder,cover,video_order,cross_post_facebook,facebook_page_id,facebook_page_token) VALUES (?,?,?,?,?,?,?) ON CONFLICT(account_id) DO UPDATE SET folder=excluded.folder,cover=excluded.cover,video_order=excluded.video_order,cross_post_facebook=excluded.cross_post_facebook,facebook_page_id=excluded.facebook_page_id,facebook_page_token=excluded.facebook_page_token').run(accountId, folder && path.resolve(folder), cover && path.resolve(cover), videoOrder, crossPostFacebook, facebookPageId, facebookPageToken);
+    const coverName = changes.cover === undefined ? current.cover_name : cover ? path.basename(cover) : null;
+    const copied = changes.cover !== undefined && cover && (!this.isManagedCover(current.cover) || path.resolve(cover) !== current.cover) ? this.copyCover(accountId, cover) : null;
+    const storedCover = copied || (cover && path.resolve(cover));
+    const storedName = !cover ? null : copied ? coverName : cover === current.cover ? current.cover_name : coverName;
+    try {
+      this.db.prepare('INSERT INTO posting_media_settings (account_id,folder,cover,cover_name,video_order,cross_post_facebook,facebook_page_id,facebook_page_token) VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(account_id) DO UPDATE SET folder=excluded.folder,cover=excluded.cover,cover_name=excluded.cover_name,video_order=excluded.video_order,cross_post_facebook=excluded.cross_post_facebook,facebook_page_id=excluded.facebook_page_id,facebook_page_token=excluded.facebook_page_token').run(accountId, folder && path.resolve(folder), storedCover, storedName, videoOrder, crossPostFacebook, facebookPageId, facebookPageToken);
+    } catch (error) { if (copied) this.removeManagedCover(copied); throw error; }
+    if (changes.cover !== undefined && current.cover && current.cover !== storedCover) this.removeManagedCover(current.cover);
     return this.snapshot();
   }
   importFolder(accountId, accountName = '', options = {}) {
@@ -354,6 +393,19 @@ class PostingPlan {
     this.db.prepare('INSERT INTO items (id,account_id,account_name,file,caption,position,created_at,content_type,source_item_id) VALUES (?,?,?,?,?,?,?,?,?)').run(randomUUID(), accountId, String(accountName).slice(0,120), file, caption, position, new Date().toISOString(), type, sourceItemId);
     return this.snapshot();
   }
+  updateCaptions(accountIds, caption, onlyEmpty = false) {
+    if (!Array.isArray(accountIds) || !accountIds.length || accountIds.some(id => typeof id !== 'string' || !id)) throw new Error('Selecione pelo menos uma conta Instagram.');
+    if (typeof caption !== 'string' || !caption.trim() || caption.length > 2200) throw new Error('Escreva uma legenda de até 2.200 caracteres.');
+    if (typeof onlyEmpty !== 'boolean') throw new Error('Escolha como aplicar a legenda.');
+    const update = this.db.prepare("UPDATE items SET caption=? WHERE account_id=? AND queue_kind='account' AND status='queued'" + (onlyEmpty ? " AND trim(caption, char(9) || char(10) || char(13) || ' ')=''" : ''));
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      let updatedCount = 0;
+      for (const id of new Set(accountIds)) updatedCount += update.run(caption, id).changes;
+      this.db.exec('COMMIT');
+      return { updatedCount };
+    } catch (error) { this.db.exec('ROLLBACK'); throw error; }
+  }
   updateItem(id, changes) {
     const item = this.db.prepare('SELECT * FROM items WHERE id=?').get(id);
     if (!item || item.status !== 'queued') throw new Error('Só é possível editar vídeos ainda na fila.');
@@ -456,7 +508,9 @@ class PostingPlan {
     return this.snapshot();
   }
   cancelAccount(accountId, accountName = '') {
+    const cover = this.mediaSettings(accountId).cover;
     this.db.prepare('DELETE FROM posting_media_settings WHERE account_id=?').run(accountId);
+    this.removeManagedCover(cover);
     this.db.prepare('UPDATE items SET account_name=? WHERE account_id=?').run(String(accountName).slice(0, 120), accountId);
     this.db.prepare("UPDATE items SET status='cancelled' WHERE account_id=? AND status='queued'").run(accountId);
     this.db.prepare("UPDATE schedules SET status='stopped',next_at=NULL WHERE account_id=?").run(accountId);

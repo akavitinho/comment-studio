@@ -58,6 +58,17 @@ test('conta exige referência a proxy existente', () => {
   assert.throws(() => domain.campaign(validCampaign, [{ id: 'one', platform: 'x' }]), /TikTok/);
   assert.throws(() => domain.account({ name: 'Conta', platform: 'other' }, []), /Plataforma/);
 });
+test('conta separa conexão de login da conexão de publicação', () => {
+  const proxies = [{ id: 'proxy-1', name: 'Proxy da conta' }];
+  const direct = domain.account({ platform: 'instagram', name: 'Loja', proxyId: 'proxy-1', postingConnection: 'direct' }, proxies);
+  assert.equal(direct.proxyId, 'proxy-1');
+  assert.equal(direct.postingConnection, 'direct');
+  assert.equal(domain.postingProxy(direct, proxies), null);
+  const viaProxy = domain.account({ platform: 'facebook', name: 'Página', proxyId: 'proxy-1', postingConnection: 'proxy' }, proxies);
+  assert.equal(domain.postingProxy(viaProxy, proxies), proxies[0]);
+  assert.equal(domain.postingProxy({ proxyId: 'proxy-1' }, proxies), proxies[0], 'contas antigas preservam a rota via proxy');
+  assert.throws(() => domain.account({ platform: 'instagram', name: 'Loja', postingConnection: 'proxy' }, proxies), /conexão de publicação/);
+});
 test('Instagram preenche o nick ao conectar e preserva nomes personalizados', () => {
   const automatic = domain.account({ platform: 'instagram', name: '' }, []);
   assert.match(automatic.name, /^Instagram [a-f0-9]{8}$/);

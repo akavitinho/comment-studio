@@ -2,6 +2,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { randomBytes, randomUUID } = require('node:crypto');
 const { createProxyFetch } = require('./proxy-fetch.cjs');
+const { authorizationCode } = require('./oauth-callback.cjs');
 
 const SCOPES = ['pages_show_list', 'pages_read_engagement', 'pages_manage_posts', 'pages_manage_engagement', 'read_insights'];
 class FacebookAuth {
@@ -11,6 +12,7 @@ class FacebookAuth {
     this.data = fs.existsSync(this.file) ? JSON.parse(fs.readFileSync(this.file, 'utf8')) : { installId: randomBytes(24).toString('hex'), pages: {} };
     if (!this.data.installId) { this.data.installId = randomBytes(24).toString('hex'); this.save(); }
     this.pending = new Map();
+    this.external = new Map();
   }
   save() { fs.writeFileSync(`${this.file}.tmp`, JSON.stringify(this.data), { mode: 0o600 }); fs.renameSync(`${this.file}.tmp`, this.file); }
   async seal(value) {
@@ -47,12 +49,31 @@ class FacebookAuth {
     if (!response.ok) throw new Error(String(data.error || 'Serviço de login Facebook indisponível.'));
     return data;
   }
-  async connect(connection) {
+  async beginAuthorization(connection) {
     const flowId = randomUUID();
     const started = await this.service(connection, { action: 'start', accountId: flowId });
-    if (!/^\d{8,25}$/.test(String(started.appId || '')) || typeof started.state !== 'string') throw new Error('Configuração do login Facebook inválida.');
+    const expectedRedirect = `${this.getStorageSettings()?.url || ''}/functions/v1/meta-callback`;
+    if (!/^\d{8,25}$/.test(String(started.appId || '')) || started.provider !== 'facebook' || typeof started.state !== 'string' || started.redirectUri !== expectedRedirect) throw new Error('Configuração do login Facebook inválida.');
     const login = new URL('https://www.facebook.com/dialog/oauth');
     for (const [key, value] of Object.entries({ client_id: started.appId, redirect_uri: started.redirectUri, state: started.state, response_type: 'code', scope: SCOPES.join(',') })) login.searchParams.set(key, value);
+    return { flowId, started, login };
+  }
+  async startExternal(connection) {
+    const { flowId, started, login } = await this.beginAuthorization(connection);
+    const expiresAt = started.expiresAt || new Date(Date.now() + 600000).toISOString();
+    if (!(Date.parse(expiresAt) > Date.now())) throw new Error('O link de conexão expirou. Gere um novo link.');
+    this.external.set(flowId, { connection, started, expiresAt });
+    return { flowId, loginUrl: login.toString(), expiresAt };
+  }
+  async completeExternal(flowId, callbackUrl) {
+    const pending = this.external.get(flowId);
+    if (!pending) throw new Error('Este link de conexão não está mais ativo. Gere outro link.');
+    const code = authorizationCode(callbackUrl, pending.started.redirectUri, pending.started.state, pending.expiresAt);
+    this.external.delete(flowId);
+    return this.finishAuthorization(pending.connection, flowId, pending.started, code);
+  }
+  async connect(connection) {
+    const { flowId, started, login } = await this.beginAuthorization(connection);
     const code = await new Promise((resolve, reject) => {
       const win = new this.BrowserWindow({ width: 620, height: 780, parent: this.parent(), title: 'Conectar Facebook', webPreferences: { session: connection.ses, contextIsolation: true, nodeIntegration: false, sandbox: true } });
       this.registerLoginWindow(win, connection);
@@ -64,6 +85,9 @@ class FacebookAuth {
       win.on('closed', () => done(new Error('Login Facebook cancelado.')));
       win.loadURL(login.toString()).catch(() => done(new Error('Não foi possível abrir o login Facebook.')));
     });
+    return this.finishAuthorization(connection, flowId, started, code);
+  }
+  async finishAuthorization(connection, flowId, started, code) {
     const exchanged = await this.service(connection, { action: 'exchange', accountId: flowId, state: started.state, code });
     if (!exchanged.accessToken) throw new Error('O Facebook não retornou autorização.');
     const fetch = createProxyFetch(this.net, connection);

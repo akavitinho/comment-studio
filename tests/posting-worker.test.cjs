@@ -39,8 +39,11 @@ test('prepara a capa da conta no momento de postar, envia só o temporário e pr
     const original = fixture.plan.snapshot().items[0].file;
     const cover = path.join(path.dirname(original), 'cover.png'); fs.writeFileSync(cover, 'cover');
     fixture.plan.saveMediaSettings('account-1', { cover });
+    const savedCover = fixture.plan.mediaSettings('account-1').cover;
+    fs.unlinkSync(cover);
     await fixture.worker.run('account-1');
-    assert.deepEqual(observed, [{ file: original, cover }]);
+    assert.deepEqual(observed, [{ file: original, cover: savedCover }]);
+    assert.equal(fs.readFileSync(savedCover, 'utf8'), 'cover');
     assert.equal(fixture.uploadedFile, preparedFile);
     assert.equal(fs.existsSync(preparedFile), false);
     assert.equal(fs.existsSync(original), true);
@@ -74,9 +77,11 @@ test('duas contas usam capas diferentes para o mesmo vídeo', async () => {
     fs.writeFileSync(first, 'first'); fs.writeFileSync(second, 'second');
     fixture.plan.saveMediaSettings('account-1', { cover: first });
     fixture.plan.saveMediaSettings('account-2', { cover: second });
+    const savedFirst = fixture.plan.mediaSettings('account-1').cover;
+    const savedSecond = fixture.plan.mediaSettings('account-2').cover;
     await fixture.worker.run('account-1');
     await fixture.worker.run('account-2');
-    assert.deepEqual(covers, [first, second]);
+    assert.deepEqual(covers, [savedFirst, savedSecond]);
   } finally { fixture.close(); }
 });
 

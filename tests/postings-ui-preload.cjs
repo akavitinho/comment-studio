@@ -2,6 +2,9 @@ const { contextBridge } = require('electron');
 const account = { id: 'ig-test', platform: 'instagram', name: 'Perfil de teste', handle: 'perfil.teste', proxyId: null, tags: ['Contas antigas'], open: false, meta: { connected: true, insightsGranted: true, username: 'perfil.teste', igId: '17840000000000000' } };
 const linkedAccount = { id: 'x-test', platform: 'x', name: 'Clássico Criador', handle: 'criador.x', proxyId: 'proxy-test', open: false };
 const insightsFetchedAt = Date.now();
+let insightsListener=null,insightsCalls=0,insightsBackground=false,insightsSelectionKey="";
+contextBridge.exposeInMainWorld('onInsightsProgress',callback=>{insightsListener=callback;return ()=>{insightsListener=null;};});
+contextBridge.exposeInMainWorld('testInsights',{configure:background=>{insightsBackground=background;insightsCalls=0;},calls:()=>insightsCalls,emit:progress=>insightsListener?.({selectionKey:insightsSelectionKey,sequence:10,...progress})});
 const sampleImage = 'data:image/svg+xml,%3Csvg%20xmlns=%22http://www.w3.org/2000/svg%22%20width=%222%22%20height=%222%22%3E%3Crect%20width=%222%22%20height=%222%22%20fill=%22purple%22/%3E%3C/svg%3E';
 const snapshot = {
   accounts: [account, linkedAccount], accountTags: [{ name: 'Contas antigas', color: '#cc3366' }], proxies: [{ id: 'proxy-test', name: 'Proxy Brasil', protocol: 'http', host: '127.0.0.1', port: 8080, authenticated: true }], campaign: null, events: [], attempts: [], xAttempts: [], xCampaign: null,
@@ -21,6 +24,14 @@ const snapshot = {
 };
 contextBridge.exposeInMainWorld('studio', {
   state: async () => snapshot,
+  updatePostingCaptions: async ({ accountIds, caption, onlyEmpty }) => {
+    let updatedCount = 0;
+    for (const item of snapshot.postings.items) {
+      if (!accountIds.includes(item.account_id) || item.queue_kind === 'shared' || item.status !== 'queued' || (onlyEmpty && item.caption.trim())) continue;
+      item.caption = caption; updatedCount++;
+    }
+    return { ...snapshot, updatedCount };
+  },
   addAccount: async data => { snapshot.accounts.push({ ...data, id: `bulk-${snapshot.accounts.length}`, open: false, meta: { connected: false } }); return snapshot; },
   editAccount: async data => { Object.assign(snapshot.accounts.find(account => account.id === data.id), data); return snapshot; },
   addProxy: async data => { snapshot.proxies.push({ ...data, id: `proxy-${snapshot.proxies.length}`, authenticated: Boolean(data.username) }); return snapshot; },
@@ -47,14 +58,14 @@ contextBridge.exposeInMainWorld('studio', {
   savePostingSchedules: async ({ accountIds, config }) => { for (const accountId of accountIds) { const previous = snapshot.postings.schedules.find(schedule => schedule.account_id === accountId); if (previous) previous.config = { ...config }; else snapshot.postings.schedules.push({ account_id: accountId, config: { ...config }, status: 'stopped', next_at: null }); } return snapshot; },
   savePostingSchedule: async ({ accountId, ...config }) => { const schedule = snapshot.postings.schedules.find(row => row.account_id === accountId); schedule.config = { ...config }; return snapshot; },
   previewPostingSchedule: async () => ['2026-11-11T13:00:00.000Z'],
-  refreshInstagramInsights: async () => { snapshot.postings.insights = [{ item_id: 'video-published', views: 125, reach: 84, fetched_at: '2026-11-05T15:00:00.000Z' }]; return { state: snapshot, checked: 1, updated: 1, withoutPermission: 0, failed: 0 }; },
+  refreshInstagramInsights: async input => { insightsSelectionKey=input.selectionKey;insightsCalls++; snapshot.postings.insights = [{ item_id: 'video-published', views: 125, reach: 84, fetched_at: '2026-11-05T15:00:00.000Z' }]; return { state: snapshot, refreshId:'test-refresh',selectionKey:insightsSelectionKey,backgroundActive:insightsBackground,checked: 1, updated: 1, withoutPermission: 0, failed: 0 }; },
   retryPostingVideo: async id => { const item = snapshot.postings.items.find(video => video.id === id); if (!item || item.status !== 'attention') throw new Error('Vídeo não está em atenção.'); item.status = 'queued'; item.error = null; return snapshot; },
   controlPosting: async ({ accountId, status }) => { snapshot.postings.schedules.find(schedule => schedule.account_id === accountId).status = status; return snapshot; },
   startQueuedPostings: async () => { const started = []; for (const account of snapshot.accounts.filter(item => item.platform === 'instagram')) { if (!snapshot.postings.items.some(item => item.account_id === account.id && item.status === 'queued')) continue; const schedule = snapshot.postings.schedules.find(item => item.account_id === account.id); if (!schedule || schedule.status === 'running') continue; schedule.status = 'running'; started.push(`@${account.handle}`); } return { state: snapshot, started, skipped: [] }; },
   postingProfilePicture: async () => sampleImage,
   videoThumbnail: async () => sampleImage,
   instagramOfficialMetrics: async ({accountIds,from,to,allMedia}) => {
-    const day=86400000,today=Math.floor(Date.now()/day)*day;
+    const day=86400000,today=Math.floor((Date.now()-3*3600000)/day)*day+3*3600000;
     const single=to-from<3*day,currentFrom=single?today:today-6*day;
     const priorTo=single?to-day:currentFrom;
     const values={views:125,reach:84,profile_views:12,total_interactions:27};
@@ -67,7 +78,7 @@ contextBridge.exposeInMainWorld('studio', {
       }
       for(let at=currentFrom;at<to;at+=day)for(const [metric,value] of Object.entries(values))rows.push({account_id:accountId,start_at:at,end_at:Math.min(at+day,to),metric,value:Math.round(value/7),fetched_at:insightsFetchedAt});
     }
-    const media=['views','reach','likes','comments','shares','saved'].map((metric,index)=>({item_id:'video-published',account_id:'ig-test',caption:'Publicado',metric,value:[125,84,15,5,3,2][index],fetched_at:insightsFetchedAt}));
+    const media=['views','reach','likes','comments','shares','saved'].map((metric,index)=>({item_id:'video-published',account_id:'ig-test',published_at:new Date(insightsFetchedAt-1800000).toISOString(),caption:'Publicado',metric,value:[125,84,15,5,3,2][index],fetched_at:insightsFetchedAt}));
     return {metrics:rows,media,followers:accountIds.map(account_id=>({account_id,value:240,fetched_at:insightsFetchedAt})),authorizedIds:accountIds};
   }
 });
